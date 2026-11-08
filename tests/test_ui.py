@@ -989,7 +989,14 @@ def test_browser_size_layout_and_layers_persist(qapp, browse_dir, tmp_path, monk
     w._save_state()
     assert s.map_layers == {"things": True, "keys": False, "weapons": True, "secrets": True}
     assert set(s.file_browser_state) == {"main_split", "maps_split", "right_split", "columns"}
-    assert s.file_browser_width == w.browser_dock.width()
+    # The width the user leaves the panel at is remembered; a width squeezed below the
+    # minimum (e.g. by a small screen) is not.
+    monkeypatch.setattr(w.browser_dock, "width", lambda: 450)
+    w._save_state()
+    assert s.file_browser_width == 450
+    monkeypatch.setattr(w.browser_dock, "width", lambda: 200)
+    w._save_state()
+    assert s.file_browser_width == 450
     sizes = w.file_browser.main_split.sizes()
     w.file_browser.stop()
 
