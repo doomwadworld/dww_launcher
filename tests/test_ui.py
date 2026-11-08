@@ -883,14 +883,22 @@ def preview(qapp):
     return pv
 
 
+def first_marker(preview, kind):
+    return next(t for k, t in preview._markers if k == kind)
+
+
 def test_preview_layers_prepared(preview):
-    t = preview._things
-    assert len(t["monster"]) == 2 and len(t["player"]) == 1  # UV, single-player only
-    assert len(t["key"]) == 1 and len(t["weapon"]) == 1
+    from collections import Counter
+
+    # UV single-player things: 2 imps, player 1 + deathmatch start, a key and a shotgun
+    assert Counter(k for k, _ in preview._markers) == {"monster": 2, "player": 2, "key": 1, "weapon": 1}
+    visible = Counter(t.type for _, t in preview.visible_markers())
+    assert visible == {3001: 2, 1: 1, 5: 1, 2001: 1}  # deathmatch starts are hidden by default
     assert preview.legend_entries() == [("exit", "exit")]
-    preview.grab()  # paints without errors with every layer on
-    for name in ("things", "keys", "weapons", "secrets"):
-        preview.set_layer(name, True)
+    preview.grab()  # paints without errors
+    preview.set_thing_filter(set(), set())
+    preview.set_layer("exits", False)
+    assert preview.legend_entries() == []
     preview.grab()
 
 
@@ -954,8 +962,8 @@ def test_layer_toggles_and_popout(qapp, browse_dir):
     changes = []
     fb.layers_changed.connect(changes.append)
     select(fb, "MULTI.WAD")
-    fb.viewer.checks["things"].setChecked(True)
-    assert fb.preview.layers["things"] and changes[-1]["things"]
+    fb.viewer.thing_filter.show_all()
+    assert fb.preview.hidden_categories == set() and changes[-1]["hidden_categories"] == []
 
     fb.pop_out_map()
     win = fb.map_window
@@ -984,10 +992,15 @@ def test_browser_size_layout_and_layers_persist(qapp, browse_dir, tmp_path, monk
     assert requested == [410]  # opens at the remembered width
 
     w.file_browser.main_split.setSizes([100, 300])
-    w.file_browser.viewer.checks["things"].setChecked(True)
-    w.file_browser.viewer.checks["keys"].setChecked(False)
+    viewer = w.file_browser.viewer
+    viewer.checks["exits"].setChecked(False)
+    keys = next(viewer.thing_filter.tree.topLevelItem(i) for i in range(viewer.thing_filter.tree.topLevelItemCount())
+                if viewer.thing_filter.tree.topLevelItem(i).text(0) == "Keys")
+    keys.setCheckState(0, Qt.CheckState.Unchecked)
     w._save_state()
-    assert s.map_layers == {"things": True, "keys": False, "weapons": True, "secrets": True}
+    assert s.map_layers == {"secrets": True, "exits": False,
+                            "hidden_categories": ["Decoration", "Key", "Obstacle", "Other", "Teleport"],
+                            "hidden_types": [2, 3, 4, 11]}
     assert set(s.file_browser_state) == {"main_split", "maps_split", "right_split", "columns"}
     # The width the user leaves the panel at is remembered; a width squeezed below the
     # minimum (e.g. by a small screen) is not.
@@ -1016,9 +1029,9 @@ def test_hover_highlights_and_describes_things(preview):
     from PySide6.QtTest import QTest
     from PySide6.QtWidgets import QToolTip
 
-    preview.set_layer("things", True)
+    preview.set_thing_filter(set(), set())
     preview.show()
-    imp = preview._things["monster"][0]
+    imp = first_marker(preview, "monster")
     c = preview.map_to_screen(imp.x, imp.y)
     assert [t.name for _, t in preview.markers_at(c)][:1] == ["Imp"]
     assert preview.tooltip_for(c).startswith("Imp\nMonster · type 3001")
@@ -1037,9 +1050,9 @@ def test_hover_highlights_and_describes_things(preview):
     preview.event(QHelpEvent(QEvent.Type.ToolTip, far, preview.mapToGlobal(far)))
     assert QToolTip.text() == "hint"
 
-    preview.set_layer("things", False)  # hidden things can't be hovered
+    preview.set_thing_filter({"Monster"}, set())  # hidden things can't be hovered
     assert preview.markers_at(c) == [] and preview._hover == []
-    key = preview._things["key"][0]
+    key = first_marker(preview, "key")
     assert preview.tooltip_for(preview.map_to_screen(key.x, key.y)).startswith("Blue keycard\nKey")
 
 
@@ -1053,7 +1066,7 @@ def test_hover_lists_stacked_things(qapp):
     pv = MapPreview()
     pv.resize(300, 300)
     pv.set_map(m)
-    pv.set_layer("things", True)
+    pv.set_thing_filter(set(), set())
     text = pv.tooltip_for(pv.map_to_screen(100, 100))
     assert text.count("Imp") == 3 and text.endswith("…and 2 more here")
 
@@ -1072,8 +1085,8 @@ def test_preview_uses_sprite_icons(qapp, preview):
                                      ("BKEYA0", pic), ("S_END", b"")]))
     m = preview.map
     preview.set_map(m, sprites=SpriteSource([wad]))
-    preview.set_layer("things", True)
-    imp = preview._things["monster"][0]
+    preview.set_thing_filter(set(), set())
+    imp = first_marker(preview, "monster")
     assert preview.icon(3001) is not None and preview.icon(2001) is None  # no shotgun sprite: shape
     assert preview.marker_radius("monster", imp) == preview.icon_box("monster") / 2
     c = preview.map_to_screen(imp.x, imp.y)
@@ -1103,3 +1116,105 @@ def test_launcher_offers_selected_iwad_first(qapp, tmp_path, wad_factory):
     w = MainWindow(Settings(iwads=[str(a), str(b)], last_iwad=str(b), demo_dir=str(tmp_path),
                             auto_download=False))
     assert w._sprite_iwads() == [str(b), str(a)]
+
+
+# ------------------------------------------------------------ thing filter, exits
+
+def _filter_item(tf, label):
+    for i in range(tf.tree.topLevelItemCount()):
+        item = tf.tree.topLevelItem(i)
+        if item.text(0) == label:
+            return item
+        for j in range(item.childCount()):
+            if item.child(j).text(0) == label:
+                return item.child(j)
+    raise AssertionError(label)
+
+
+def test_normalize_layers_migrates_old_settings():
+    from dww_launcher.ui.map_view import DEFAULT_LAYERS, normalize_layers
+
+    assert normalize_layers({"things": True, "keys": False, "weapons": True, "secrets": False}) == \
+        {**DEFAULT_LAYERS, "secrets": False}
+    out = normalize_layers({"hidden_categories": ["Monster", "Bogus"], "hidden_types": [5, "6"], "exits": "x"})
+    assert out["hidden_categories"] == ["Monster"] and out["hidden_types"] == [5, 6] and out["exits"] is True
+
+
+def test_thing_filter_tree(qapp):
+    from dww_launcher.ui.map_view import MapViewer
+
+    viewer = MapViewer()
+    viewer.set_map(_square_map())
+    tf = viewer.thing_filter
+    seen = []
+    viewer.layers_changed.connect(seen.append)
+    monsters = _filter_item(tf, "Monsters")
+    assert monsters.text(1) == "2" and monsters.checkState(0) == Qt.CheckState.Checked
+    assert _filter_item(tf, "Imp").text(1) == "2"
+    assert _filter_item(tf, "Player starts").checkState(0) == Qt.CheckState.PartiallyChecked  # DM start hidden
+    assert _filter_item(tf, "Ammo").text(0) == "Ammo" and _filter_item(tf, "Health").text(0) == "Health"
+
+    _filter_item(tf, "Imp").setCheckState(0, Qt.CheckState.Unchecked)  # one type off
+    assert 3001 in viewer.preview.hidden_types and seen[-1]["hidden_types"] == [2, 3, 4, 11, 3001]
+    assert _filter_item(tf, "Monsters").checkState(0) == Qt.CheckState.PartiallyChecked
+    assert not any(t.type == 3001 for _, t in viewer.preview.visible_markers())
+
+    _filter_item(tf, "Monsters").setCheckState(0, Qt.CheckState.Checked)  # whole category back on
+    assert 3001 not in viewer.preview.hidden_types
+
+    _filter_item(tf, "Weapons").setCheckState(0, Qt.CheckState.Unchecked)
+    assert "Weapon" in viewer.preview.hidden_categories
+    _filter_item(tf, "Shotgun").setCheckState(0, Qt.CheckState.Checked)  # one type of a hidden category
+    assert "Weapon" not in viewer.preview.hidden_categories
+    assert any(t.type == 2001 for _, t in viewer.preview.visible_markers())
+
+    tf.hide_all()
+    assert viewer.preview.visible_markers() == []
+    tf.show_all()
+    assert len(viewer.preview.visible_markers()) == 6
+    tf.reset()
+    assert viewer.layers() == {**__import__("dww_launcher.ui.map_view", fromlist=["x"]).DEFAULT_LAYERS}
+
+
+def test_exits_toggle_and_legend_jump(qapp, preview):
+    from PySide6.QtCore import QPoint
+    from PySide6.QtTest import QTest
+
+    assert preview.exit_count("exit") == 1
+    assert len(preview._lines["one"]) == 6  # the exit line is still drawn as a wall
+    preview.show()
+    preview.grab()
+    rect, kind = preview._legend_rects[0]
+    assert kind == "exit"
+    preview._animation.setDuration(0)
+    QTest.mouseClick(preview, Qt.MouseButton.LeftButton, pos=rect.center().toPoint())
+    target = preview._exit_groups["exit"][0]
+    assert preview.zoom >= 1.0 and preview._flash == (target, "exit")
+    QTest.qWait(50)
+    assert (preview.center.x(), preview.center.y()) == pytest.approx((target.center().x(), target.center().y()))
+
+    preview.set_layer("exits", False)
+    preview.grab()
+    assert preview._legend_rects == [] and preview.legend_entries() == []
+
+
+def test_exit_clusters_and_cycling(qapp):
+    from PySide6.QtCore import QLineF
+
+    from dww_launcher.mapdata import Line, MapData
+    from dww_launcher.ui.map_view import MapPreview, _cluster
+
+    # two lines of one switch close together, and a second exit far away
+    boxes = _cluster([QLineF(0, 0, 0, 64), QLineF(16, 0, 16, 64), QLineF(4000, 4000, 4064, 4000)])
+    assert len(boxes) == 2
+    m = MapData("MAP01", "Doom", vertices=[(0, 0), (0, 64), (16, 0), (16, 64), (4000, 4000), (4064, 4000)])
+    m.lines = [Line(0, 1, 11, False), Line(2, 3, 11, False), Line(4, 5, 52, False)]
+    pv = MapPreview()
+    pv.resize(400, 300)
+    pv.set_map(m)
+    assert pv.exit_count("exit") == 2 and pv.legend_entries() == [("exit", "exit (2)")]
+    first = pv.jump_to_exit("exit", animate=False)
+    second = pv.jump_to_exit("exit", animate=False)
+    third = pv.jump_to_exit("exit", animate=False)
+    assert first != second and third == first  # cycles through the exits
+    assert pv.jump_to_exit("secret") is None

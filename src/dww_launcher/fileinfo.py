@@ -11,7 +11,7 @@ from datetime import datetime
 from pathlib import Path
 
 from dww_launcher.lmp import DemoError, DemoInfo, format_duration, read_demo
-from dww_launcher.mapdata import MapData, MapError, find_maps, load_map
+from dww_launcher.mapdata import MapData, MapError, find_maps, load_map, wad_totals
 from dww_launcher.wad import WadError, WadFile, identify_game, map_sort_key
 
 WAD_EXTENSIONS = {".wad", ".pwd"}
@@ -145,6 +145,18 @@ def _map_key(name: str):
         return (1, name)
 
 
+def _pk3_map_wads(path: str | Path) -> list[WadFile]:
+    wads = []
+    with zipfile.ZipFile(path) as zf:
+        for n in zf.namelist():
+            if n.lower().startswith("maps/") and n.lower().endswith(".wad"):
+                try:
+                    wads.append(WadFile(zf.read(n), name=n))
+                except WadError:
+                    continue
+    return wads
+
+
 def list_maps(path: str | Path) -> list[str]:
     """Map names in a WAD or PK3, in a sensible order."""
     e = ext(path)
@@ -230,6 +242,19 @@ def _map_range(maps: list[str]) -> str:
     if not maps:
         return "None"
     return f"{len(maps)}  ({maps[0]} – {maps[-1]})" if len(maps) > 1 else f"1  ({maps[0]})"
+
+
+def _totals_section(wads: list[WadFile]) -> Section | None:
+    totals, largest = wad_totals(wads)
+    if largest is None:
+        return None
+    labels = (("things", "Things"), ("monsters", "Monsters (UV)"), ("secrets", "Secrets"),
+              ("linedefs", "Linedefs"), ("sidedefs", "Sidedefs"), ("vertices", "Vertices"),
+              ("sectors", "Sectors"))
+    rows = [(f"Total {label.lower()}" if key != "monsters" else "Total monsters (UV)", f"{totals[key]:,}")
+            for key, label in labels]
+    rows.append(("Largest map", f"{largest[0]} ({largest[1]:,} linedefs)"))
+    return ("Level totals", rows)
 
 
 def _wad_details(path: Path) -> Section:
@@ -351,8 +376,14 @@ def details(path: str | Path) -> list[Section]:
     try:
         if e in WAD_EXTENSIONS:
             sections.append(_wad_details(path))
+            totals = _totals_section([WadFile(path)])
+            if totals:
+                sections.append(totals)
         elif e in PK3_EXTENSIONS:
             sections.append(_pk3_details(path))
+            totals = _totals_section(_pk3_map_wads(path))
+            if totals:
+                sections.append(totals)
         elif e in DEMO_EXTENSIONS:
             sections.append(_demo_details(path))
         elif e in DEH_EXTENSIONS:

@@ -48,6 +48,8 @@ playing back and packaging demos.
 - **Detail tab:** file properties (size, dates, permissions) plus Doom details:
   - WADs: type, game, lumps, levels, map formats, sprite/flat/patch/music/sound counts, and
     notable lumps such as DEHACKED, UMAPINFO, MAPINFO, DECORATE and ZSCRIPT.
+  - Level totals for WADs and PK3s with maps: things, monsters on UV, secrets, linedefs,
+    sidedefs, vertices and sectors across all maps, plus the largest map.
   - Demos: format (vanilla, longtics, Boom, MBF, MBF21, DSDA-Doom), starting map, skill,
     players, length, flags, and, when the port wrote one, the port and command line used.
 - **Maps tab** (WADs and PK3s with levels): an automap-style preview with exits highlighted, and
@@ -59,17 +61,21 @@ playing back and packaging demos.
     **double-click** or **Fit** to see the whole map. When zoomed in, **middle-click** starts
     autoscroll: move away from the marker to scroll that way, faster the further you go. Click
     again, or release after holding, to stop.
-  - **Layer toggles**, whose icons double as the legend:
-    - **Things** (red monsters, green player start, grey everything else on UV single player)
-    - **Keys** (cards as squares, skull keys as diamonds, in their colours)
-    - **Weapons** (cyan triangles)
-    - **Secrets** (secret sectors filled purple)
-
-    Keys and weapons work independently of Things, so you can show only those.
+  - **Things ▾** opens a filter with every thing category (monsters, player starts, keys,
+    weapons, ammo, health, armor, power-ups, obstacles, decorations, teleport destinations,
+    other). Each category expands to the thing types on the current map, with their sprites and
+    counts, and every category and type can be switched on or off. Settings carry over to other
+    maps; **Defaults** restores the starting set. Things shown are those present on
+    Ultra-Violence in single player; keys are always included.
+  - **Secrets** fills secret sectors in purple; **Exits** highlights exit lines (orange) and
+    secret exit lines (violet).
+  - The in-map legend lists the exits. **Click it** to glide to the exit line, which is briefly
+    outlined; with several exits, click again for the next one.
   - **Sprites:** things are drawn with their own pictures, read from your IWAD (the selected
     one first, then your other IWADs for anything missing) and from the WAD being previewed, so
-    custom sprites show up too. Nothing is bundled with the launcher. Monsters and player starts
-    appear as face close-ups on red or green tiles. Without an IWAD the plain shapes are used.
+    custom sprites show up too. Nothing is bundled with the launcher. Every icon sits on a
+    translucent tile in its category's colour so it stands out from the map; monsters and player
+    starts appear as face close-ups. Without an IWAD, coloured shapes are used instead.
   - **Hover** over a thing to highlight it and see a tooltip with its name, category and type
     number, the skill levels it appears on, ambush/multiplayer-only flags, its position and
     which way it faces. Things stacked on the same spot are listed together.

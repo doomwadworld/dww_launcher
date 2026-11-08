@@ -46,7 +46,7 @@ from dww_launcher.fileinfo import (
 )
 from dww_launcher.mapdata import MapData, map_stats
 from dww_launcher.sprites import SpriteSource
-from dww_launcher.ui.map_view import DEFAULT_LAYERS, MapViewer, MapWindow
+from dww_launcher.ui.map_view import MapViewer, MapWindow
 from dww_launcher.wad import WadError, WadFile
 
 COLUMNS = ["Name", "Type", "Levels / Map", "Game / IWAD", "Length", "Size", "Modified"]
@@ -528,7 +528,7 @@ class FileBrowser(QWidget):
         return self.viewer.layers()
 
     def set_layers(self, layers: dict[str, bool]) -> None:
-        self.viewer.set_layers({**DEFAULT_LAYERS, **layers})
+        self.viewer.set_layers(layers)
 
     # -------------------------------------------------------------- persistence
     def save_state(self) -> dict[str, str]:
