@@ -1056,3 +1056,50 @@ def test_hover_lists_stacked_things(qapp):
     pv.set_layer("things", True)
     text = pv.tooltip_for(pv.map_to_screen(100, 100))
     assert text.count("Imp") == 3 and text.endswith("…and 2 more here")
+
+
+# ------------------------------------------------------------ sprite icons
+
+def test_preview_uses_sprite_icons(qapp, preview):
+    from test_sprites import PALETTE_BYTES, patch
+
+    from conftest import build_wad
+    from dww_launcher.sprites import SpriteSource
+    from dww_launcher.wad import WadFile
+
+    pic = patch(8, 16, [[(0, [7] * 16)]] * 8)
+    wad = WadFile(build_wad("IWAD", [("PLAYPAL", PALETTE_BYTES), ("S_START", b""), ("TROOA1", pic),
+                                     ("BKEYA0", pic), ("S_END", b"")]))
+    m = preview.map
+    preview.set_map(m, sprites=SpriteSource([wad]))
+    preview.set_layer("things", True)
+    imp = preview._things["monster"][0]
+    assert preview.icon(3001) is not None and preview.icon(2001) is None  # no shotgun sprite: shape
+    assert preview.marker_radius("monster", imp) == preview.icon_box("monster") / 2
+    c = preview.map_to_screen(imp.x, imp.y)
+    assert preview.markers_at(c)[0][1] is imp
+    preview.grab()  # icons, fallback shapes and tokens all paint
+    preview.set_map(m, sprites=None)
+    assert preview.icon(3001) is None
+
+
+def test_browser_picks_sprite_wads(qapp, browse_dir):
+    from dww_launcher.ui.file_browser import FileBrowser
+
+    iwad = str(browse_dir / "game.wad")
+    fb = FileBrowser(sprite_iwads=lambda: [iwad])
+    pwad = str(browse_dir / "MULTI.WAD")
+    src = fb.sprites_for(pwad)
+    assert [w.name for w in src.wads] == ["MULTI.WAD", "game.wad"]  # the PWAD's own sprites first
+    assert [w.name for w in fb.sprites_for(iwad).wads] == ["game.wad"]
+    assert [w.name for w in fb.sprites_for(str(browse_dir / "pack.Pk3")).wads] == ["game.wad"]
+    assert fb.sprites_for(pwad) is src  # cached
+    assert FileBrowser().sprites_for(str(browse_dir / "pack.Pk3")) is None
+
+
+def test_launcher_offers_selected_iwad_first(qapp, tmp_path, wad_factory):
+    a = wad_factory("a.wad", "IWAD", ["MAP01"])
+    b = wad_factory("b.wad", "IWAD", ["E1M1"])
+    w = MainWindow(Settings(iwads=[str(a), str(b)], last_iwad=str(b), demo_dir=str(tmp_path),
+                            auto_download=False))
+    assert w._sprite_iwads() == [str(b), str(a)]

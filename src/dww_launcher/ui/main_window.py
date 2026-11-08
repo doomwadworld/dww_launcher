@@ -1262,7 +1262,7 @@ class MainWindow(QMainWindow):
 
     # ---------------------------------------------------------- file browser
     def _build_file_browser(self) -> None:
-        self.file_browser = FileBrowser(places=self._browser_places)
+        self.file_browser = FileBrowser(places=self._browser_places, sprite_iwads=self._sprite_iwads)
         self.file_browser.add_mods.connect(self._browser_add_mods)
         self.file_browser.use_iwad.connect(self._browser_use_iwad)
         self.file_browser.play_demo.connect(self._browser_play_demo)
@@ -1274,6 +1274,12 @@ class MainWindow(QMainWindow):
         self.browser_dock.closed.connect(lambda: self.browser_action.setChecked(False))
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.browser_dock)
         self.browser_dock.hide()
+
+    def _sprite_iwads(self) -> list[str]:
+        """IWADs to take thing sprites from: the selected one first, then the others."""
+        current = self.iwad_combo.currentData()
+        others = [self.iwad_combo.itemData(i) for i in range(self.iwad_combo.count())]
+        return list(dict.fromkeys([current, *others] if current else others))
 
     def _browser_places(self) -> list[tuple[str, str]]:
         places = [("Demo folder", self.demo_dir_edit.text())]

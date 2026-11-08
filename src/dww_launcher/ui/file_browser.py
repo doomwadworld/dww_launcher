@@ -45,6 +45,7 @@ from dww_launcher.fileinfo import (
     summarize,
 )
 from dww_launcher.mapdata import MapData, map_stats
+from dww_launcher.sprites import SpriteSource
 from dww_launcher.ui.map_view import DEFAULT_LAYERS, MapViewer, MapWindow
 from dww_launcher.wad import WadError, WadFile
 
@@ -108,9 +109,12 @@ class FileBrowser(QWidget):
     directory_changed = Signal(str)
     layers_changed = Signal(dict)
 
-    def __init__(self, places=None, parent=None):
+    def __init__(self, places=None, sprite_iwads=None, parent=None):
         super().__init__(parent)
         self._places = places or (lambda: [])
+        self._sprite_iwads = sprite_iwads or (lambda: [])  # IWAD paths, preferred first
+        self._sprite_cache: dict[tuple, SpriteSource] = {}
+        self._current_sprites: SpriteSource | None = None
         self._generation = 0
         self._rows: dict[str, _Item] = {}  # path -> name item
         self._summaries: dict[str, FileSummary] = {}
@@ -450,6 +454,7 @@ class FileBrowser(QWidget):
             self._show_map(None, name, f"Can't read {name}: {exc}")
             return
         title = item.text().split("   ", 1)[1] if "   " in item.text() else ""
+        self._current_sprites = self.sprites_for(self._detail_path)
         self._show_map(m, f"{Path(self._detail_path).name} - {name}" + (f" {title}" if title else ""))
         bold = self.map_stats.font()
         bold.setBold(True)
@@ -462,12 +467,39 @@ class FileBrowser(QWidget):
             self.map_stats.addTopLevelItem(row)
 
     # -------------------------------------------------------------- map views
+    def sprites_for(self, path: str) -> SpriteSource | None:
+        """Sprites for previewing ``path``: its own pictures first, then the IWADs.
+
+        An IWAD being previewed is used before the launcher's selected IWAD; other known IWADs
+        fill in sprites the first ones lack (e.g. Doom II monsters with a Doom 1 IWAD selected).
+        """
+        iwads = [p for p in self._sprite_iwads() if p]
+        sources = []
+        if ext(path) in (".wad", ".pwd"):
+            sources.append(path)
+        sources += [p for p in iwads if p != path]
+        key = []
+        for p in sources:
+            try:
+                key.append((p, Path(p).stat().st_mtime))
+            except OSError:
+                continue
+        key = tuple(key)
+        if not key:
+            return None
+        if key not in self._sprite_cache:
+            if len(self._sprite_cache) > 8:
+                self._sprite_cache.clear()
+            self._sprite_cache[key] = SpriteSource.from_paths([p for p, _ in key])
+        return self._sprite_cache[key]
+
     def _show_map(self, m: MapData | None, title: str, message: str = "") -> None:
         self._current_map, self._current_map_title = m, title
         self._map_message = message or "No levels"
-        self.viewer.set_map(m, message)
+        sprites = self._current_sprites if m is not None else None
+        self.viewer.set_map(m, message, sprites)
         if self.map_window is not None:
-            self.map_window.show_map(m, title, message)
+            self.map_window.show_map(m, title, message, sprites)
 
     def pop_out_map(self) -> None:
         """Show the current map in its own resizable window (kept in sync with the selection)."""
@@ -477,7 +509,8 @@ class FileBrowser(QWidget):
             self.map_window.closed.connect(self._on_map_window_closed)
         self.map_window.viewer.set_layers(self.viewer.layers())
         self.map_window.show_map(self._current_map, self._current_map_title,
-                                 "" if self._current_map else self._map_message)
+                                 "" if self._current_map else self._map_message,
+                                 self._current_sprites if self._current_map else None)
         self.map_window.show()
         self.map_window.raise_()
         self.map_window.activateWindow()

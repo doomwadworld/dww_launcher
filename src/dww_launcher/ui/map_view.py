@@ -10,6 +10,7 @@ from PySide6.QtGui import QBrush, QColor, QIcon, QPainter, QPainterPath, QPen, Q
 from PySide6.QtWidgets import QCheckBox, QHBoxLayout, QSizePolicy, QToolButton, QToolTip, QVBoxLayout, QWidget
 
 from dww_launcher.mapdata import DEATHMATCH_START, KEYS, MONSTERS, WEAPONS, MapData, Thing
+from dww_launcher.sprites import SpriteSource
 
 LAYERS = ("things", "keys", "weapons", "secrets")
 DEFAULT_LAYERS = {"things": False, "keys": True, "weapons": True, "secrets": True}
@@ -54,6 +55,8 @@ class MapPreview(QWidget):
         self._secret_path = QPainterPath()
         self._things: dict[str, list] = {}
         self._hover: list[tuple[str, Thing]] = []  # markers under the mouse
+        self.sprites: SpriteSource | None = None
+        self._icons: dict[int, QPixmap | None] = {}
         self.usage_hint = ""  # tooltip shown when not over a thing
         self._drag = None  # (start pos, start center)
         self._auto_anchor: QPointF | None = None
@@ -67,8 +70,9 @@ class MapPreview(QWidget):
         self.setFocusPolicy(Qt.FocusPolicy.WheelFocus)
 
     # ---------------------------------------------------------------- data
-    def set_map(self, m: MapData | None, message: str = "") -> None:
+    def set_map(self, m: MapData | None, message: str = "", sprites: SpriteSource | None = None) -> None:
         self.map, self.message = m, message
+        self.set_sprites(sprites)
         self._lines, self._things, self._secret_path = {}, {}, QPainterPath()
         self._hover = []
         if m and m.vertices:
@@ -119,6 +123,20 @@ class MapPreview(QWidget):
                 things["other"].append(t)
         self._things = things
 
+    def set_sprites(self, sprites: SpriteSource | None) -> None:
+        """Use pictures from the given WADs for things (None = plain shapes)."""
+        self.sprites = sprites if sprites is not None and sprites.available else None
+        self._icons: dict[int, QPixmap | None] = {}
+        self.update()
+
+    def icon(self, thing_type: int) -> QPixmap | None:
+        if self.sprites is None:
+            return None
+        if thing_type not in self._icons:
+            img = self.sprites.thing_image(thing_type)
+            self._icons[thing_type] = QPixmap.fromImage(img) if img is not None and not img.isNull() else None
+        return self._icons[thing_type]
+
     def set_layer(self, name: str, visible: bool) -> None:
         self.layers[name] = visible
         self._hover = []
@@ -132,7 +150,17 @@ class MapPreview(QWidget):
     def _marker_base(self) -> float:
         return min(max(16 * self.scale, 2.5), 8.0)
 
-    def marker_radius(self, kind: str) -> float:
+    # Icon box sizes: (map units per icon, min px, max px)
+    _ICON_SIZES = {"monster": (44, 12, 40), "player": (44, 12, 40), "key": (36, 14, 30),
+                   "weapon": (44, 14, 34), "other": (32, 10, 28)}
+
+    def icon_box(self, kind: str) -> float:
+        units, low, high = self._ICON_SIZES[kind]
+        return min(max(units * self.scale, low), high)
+
+    def marker_radius(self, kind: str, t: Thing | None = None) -> float:
+        if t is not None and self.icon(t.type) is not None:
+            return self.icon_box(kind) / 2
         base = self._marker_base()
         return {"other": base * 0.7, "monster": base, "player": base}.get(kind, base + 2)
 
@@ -147,7 +175,7 @@ class MapPreview(QWidget):
         for kind, t in reversed(self.visible_markers()):
             c = self.map_to_screen(t.x, t.y)
             d = math.hypot(c.x() - pos.x(), c.y() - pos.y())
-            if d <= self.marker_radius(kind) + slop:
+            if d <= self.marker_radius(kind, t) + slop:
                 hits.append((kind, t))
         return hits
 
@@ -273,7 +301,7 @@ class MapPreview(QWidget):
             if text:
                 kind, t = self.markers_at(pos)[0]
                 c = self.map_to_screen(t.x, t.y)
-                r = self.marker_radius(kind) + 3
+                r = self.marker_radius(kind, t) + 3
                 area = QRectF(c.x() - r, c.y() - r, 2 * r, 2 * r).toAlignedRect()
                 QToolTip.showText(event.globalPos(), text, self, area)
             elif self.usage_hint:
@@ -352,12 +380,12 @@ class MapPreview(QWidget):
 
         # Things are drawn in screen space so markers stay readable at any zoom.
         for kind, t in self.visible_markers():
-            self._draw_marker(p, kind, t, self.map_to_screen(t.x, t.y), self.marker_radius(kind))
+            self._draw_marker(p, kind, t, self.map_to_screen(t.x, t.y), self.marker_radius(kind, t))
         visible = {id(t) for _, t in self.visible_markers()}
         for kind, t in self._hover:
             if id(t) in visible:  # hovered: glow, ring and a slightly larger marker on top
                 c = self.map_to_screen(t.x, t.y)
-                r = self.marker_radius(kind)
+                r = self.marker_radius(kind, t)
                 p.setPen(Qt.PenStyle.NoPen)
                 p.setBrush(QColor(255, 255, 255, 60))
                 p.drawEllipse(c, r + 7, r + 7)
@@ -371,6 +399,10 @@ class MapPreview(QWidget):
             self._paint_autoscroll_marker(p, self._auto_anchor)
 
     def _draw_marker(self, p: QPainter, kind: str, t: Thing, c: QPointF, r: float) -> None:
+        pix = self.icon(t.type)
+        if pix is not None:
+            self._draw_icon(p, kind, t, pix, c, r)
+            return
         if kind in ("other", "monster", "player"):
             p.setPen(Qt.PenStyle.NoPen)
             p.setBrush({"other": self.OTHER, "monster": self.MONSTER, "player": self.PLAYER}[kind])
@@ -388,6 +420,23 @@ class MapPreview(QWidget):
                                          QPointF(c.x(), c.y() + r), QPointF(c.x() - r, c.y())]))
             else:
                 p.drawRect(QRectF(c.x() - r * 0.75, c.y() - r * 0.75, r * 1.5, r * 1.5))
+
+    def _draw_icon(self, p: QPainter, kind: str, t: Thing, pix: QPixmap, c: QPointF, r: float) -> None:
+        box = QRectF(c.x() - r, c.y() - r, 2 * r, 2 * r)
+        if kind in ("monster", "player"):  # face token: dark tile with a coloured border
+            p.setPen(QPen(self.MONSTER if kind == "monster" else self.PLAYER, 1.5))
+            p.setBrush(QColor(0, 0, 0, 170))
+            p.drawRoundedRect(box, 3, 3)
+            box = box.adjusted(1.5, 1.5, -1.5, -1.5)
+        # fit the picture in the box, keeping its proportions
+        scale = min(box.width() / pix.width(), box.height() / pix.height())
+        w, h = pix.width() * scale, pix.height() * scale
+        target = QRectF(box.center().x() - w / 2, box.center().y() - h / 2, w, h)
+        p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, scale < 1)  # crisp pixels when enlarged
+        if t.type == 58:  # spectre: partially invisible
+            p.setOpacity(0.45)
+        p.drawPixmap(target, pix, QRectF(pix.rect()))
+        p.setOpacity(1.0)
 
     def legend_entries(self) -> list[tuple[str, str]]:
         """(kind, label) rows for the small in-map legend.
@@ -539,8 +588,8 @@ class MapViewer(QWidget):
         self.fit_button.clicked.connect(self.preview.fit)
         layout.addWidget(self.preview, 1)
 
-    def set_map(self, m: MapData | None, message: str = "") -> None:
-        self.preview.set_map(m, message)
+    def set_map(self, m: MapData | None, message: str = "", sprites: SpriteSource | None = None) -> None:
+        self.preview.set_map(m, message, sprites)
 
     def layers(self) -> dict[str, bool]:
         return {n: box.isChecked() for n, box in self.checks.items()}
@@ -572,9 +621,10 @@ class MapWindow(QWidget):
         layout.addWidget(self.viewer)
         self.resize(900, 720)
 
-    def show_map(self, m: MapData | None, title: str, message: str = "") -> None:
+    def show_map(self, m: MapData | None, title: str, message: str = "",
+                 sprites: SpriteSource | None = None) -> None:
         self.setWindowTitle(f"{title} - Map Preview" if title else "Map Preview")
-        self.viewer.set_map(m, message)
+        self.viewer.set_map(m, message, sprites)
 
     def closeEvent(self, event):
         super().closeEvent(event)
