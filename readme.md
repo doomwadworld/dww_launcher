@@ -33,6 +33,28 @@ playing back and packaging demos.
   back later: port, IWAD, mods, map, skill, complevel, flags, extra args, demo options and
   folders. Profiles are JSON files in a `profiles` folder inside the config directory.
 - **About** (toolbar): version and links to the YouTube channel, Discord and GitHub.
+- Press **Ctrl+C** in the terminal you started it from to quit (settings are saved).
+
+### File browser
+
+**File Browser ▸** on the right of the toolbar (or **Ctrl+B**) slides out a panel on the right.
+
+- **File table** of `.wad`, `.pwd`, `.pk3`, `.lmp`, `.deh` and `.bex` files (any letter case) and
+  folders. Columns: type, number of levels (or a demo's starting map and skill), game or IWAD,
+  demo length, size and date. Click a heading to sort.
+- **Double-click:** a PWAD/PK3/DEH is added to the mods list, an IWAD becomes the IWAD, a demo is
+  played with the current settings, and a folder is opened. Right-click for the same actions on
+  several files at once, plus Copy Path.
+- **Detail tab:** file properties (size, dates, permissions) plus Doom details:
+  - WADs: type, game, lumps, levels, map formats, sprite/flat/patch/music/sound counts, and
+    notable lumps such as DEHACKED, UMAPINFO, MAPINFO, DECORATE and ZSCRIPT.
+  - Demos: format (vanilla, longtics, Boom, MBF, MBF21, DSDA-Doom), starting map, skill,
+    players, length, flags, and, when the port wrote one, the port and command line used.
+- **Maps tab** (WADs and PK3s with levels): an automap-style preview with exits highlighted, and
+  statistics: things, monsters on UV, secrets, exit and secret-exit lines, keys, weapons, player
+  starts, line/side/vertex/sector counts and map size. Doom, Hexen and UDMF maps are supported.
+  For files with several levels, a list of maps (with titles from UMAPINFO/MAPINFO) sits above
+  the statistics.
 
 ### Demo Submission tab
 
@@ -133,9 +155,13 @@ src/dww_launcher/
   icons.py            application icon (resources/)
   desktop.py          starting other programs with a clean environment (file manager, browser)
   profiles.py         named configuration profiles
+  lmp.py              demo (.lmp) parsing: formats, length, port footer
+  mapdata.py          map geometry and statistics (Doom/Hexen/UDMF)
+  fileinfo.py         file summaries and properties for the file browser
+  ui/file_browser.py  the file browser panel and map preview
   ui/main_window.py   the main window
 packaging/            PyInstaller spec and entry point
 scripts/make_icons.py regenerates the icon files from resources/icon_source.png
 .github/workflows/    CI: tests on all platforms, builds executables, publishes releases
-tests/
+tests/                test suite (tests/data/demos: real demo files, see its README)
 ```

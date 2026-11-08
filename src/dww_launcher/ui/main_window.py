@@ -6,7 +6,7 @@ import html
 from datetime import datetime, timezone
 from pathlib import Path
 
-from PySide6.QtCore import QProcess, QRegularExpression, Qt, Signal
+from PySide6.QtCore import QProcess, QRegularExpression, Qt, QTimer, Signal
 from PySide6.QtGui import QAction, QFontDatabase, QRegularExpressionValidator
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
     QDialogButtonBox,
+    QDockWidget,
     QFileDialog,
     QFormLayout,
     QGroupBox,
@@ -29,6 +30,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
+    QSizePolicy,
     QSplitter,
     QTabWidget,
     QToolButton,
@@ -75,6 +77,7 @@ from dww_launcher.submission import (
     submission_text,
     text_warnings,
 )
+from dww_launcher.ui.file_browser import FileBrowser
 from dww_launcher.wad import WadError, WadInfo, file_date, is_v12_era, map_sort_key, read_wad
 
 WAD_FILTER = "Doom files (*.wad *.WAD *.pk3 *.PK3 *.deh *.DEH *.bex *.BEX);;All files (*)"
@@ -103,6 +106,7 @@ TXT_TOOLTIP = "Write the text file to the demo folder"
 YOUTUBE_URL = "https://www.youtube.com/@DOOMWADWorld"
 DISCORD_URL = "https://discord.com/invite/aUsWnqaePy"
 GITHUB_URL = "https://github.com/doomwadworld/dww_launcher"
+BROWSER_WIDTH = 640  # width the window grows by when the file browser opens
 ENTRY_PLACEHOLDER = "e.g. 12493, https://www.doomworld.com/idgames/levels/doom2/a-c/zzsketch, levels/doom/Ports/a-c/foo"
 
 
@@ -358,6 +362,7 @@ class MainWindow(QMainWindow):
         central.setStretchFactor(1, 1)
         central.setChildrenCollapsible(False)
         self.setCentralWidget(central)
+        self._build_file_browser()
 
         # Any change refreshes the preview.
         for combo in (self.port_combo, self.map_combo, self.skill_combo):
@@ -404,6 +409,15 @@ class MainWindow(QMainWindow):
         about.setText("About")
         about.clicked.connect(self.show_about)
         toolbar.addWidget(about)
+
+        spacer = QWidget()
+        spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        toolbar.addWidget(spacer)
+        self.browser_action = QAction("File Browser ▸", self, checkable=True)
+        self.browser_action.setShortcut("Ctrl+B")
+        self.browser_action.setToolTip("Show or hide the file browser (Ctrl+B)")
+        self.browser_action.toggled.connect(self.set_file_browser_visible)
+        toolbar.addAction(self.browser_action)
 
     def _build_submission_tab(self) -> QWidget:
         tab = QWidget()
@@ -538,6 +552,8 @@ class MainWindow(QMainWindow):
         self._select_data(self.iwad_combo, s.last_iwad)
         self.iwad_combo.blockSignals(False)
         self.pwad_list.add_paths(s.last_pwads)
+        if s.file_browser_visible:
+            self.browser_action.setChecked(True)
 
     def _save_state(self) -> None:
         s = self.settings
@@ -552,6 +568,9 @@ class MainWindow(QMainWindow):
         s.keep_latest_attempt = self.keep_latest_check.isChecked()
         s.txt_dir_same_as_demo = self.txt_same_check.isChecked()
         s.txt_dir = self._txt_dir_custom
+        s.file_browser_dir = self.file_browser.directory or s.file_browser_dir
+        s.file_browser_visible = self.browser_dock.isVisibleTo(self) if self.isVisible() \
+            else self.browser_action.isChecked()
         try:
             s.save()
         except OSError as exc:
@@ -559,6 +578,7 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event):
         self._save_state()
+        self.file_browser.stop()
         super().closeEvent(event)
 
     @staticmethod
@@ -1233,6 +1253,95 @@ class MainWindow(QMainWindow):
         self.current_profile = name
         self.setWindowTitle("Doom WAD World Launcher" + (f" - {name}" if name else ""))
 
+    # ---------------------------------------------------------- file browser
+    def _build_file_browser(self) -> None:
+        self.file_browser = FileBrowser(places=self._browser_places)
+        self.file_browser.add_mods.connect(self._browser_add_mods)
+        self.file_browser.use_iwad.connect(self._browser_use_iwad)
+        self.file_browser.play_demo.connect(self._browser_play_demo)
+        self.browser_dock = _BrowserDock("File Browser", self)
+        self.browser_dock.setObjectName("FileBrowserDock")
+        self.browser_dock.setWidget(self.file_browser)
+        self.browser_dock.setAllowedAreas(Qt.DockWidgetArea.RightDockWidgetArea)
+        self.browser_dock.setFeatures(QDockWidget.DockWidgetFeature.DockWidgetClosable)
+        self.browser_dock.closed.connect(lambda: self.browser_action.setChecked(False))
+        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.browser_dock)
+        self.browser_dock.hide()
+
+    def _browser_places(self) -> list[tuple[str, str]]:
+        places = [("Demo folder", self.demo_dir_edit.text())]
+        if self.iwad_combo.currentData():
+            places.append(("IWAD folder", str(Path(self.iwad_combo.currentData()).parent)))
+        for folder in dict.fromkeys(str(Path(p).parent) for p in self.pwad_list.paths()):
+            places.append(("Mod folder", folder))
+        if self.port_combo.currentData():
+            places.append(("Source port folder", str(resolve_executable(self.port_combo.currentData()).parent)))
+        if not self.txt_same_check.isChecked():
+            places.append(("Text file folder", self.txt_dir_edit.text()))
+        return places
+
+    def set_file_browser_visible(self, visible: bool) -> None:
+        """Slide the file browser out of (or back into) the right side of the window."""
+        if self.browser_action.isChecked() != visible:
+            self.browser_action.setChecked(visible)  # re-enters via toggled
+            return
+        if visible == self.browser_dock.isVisibleTo(self):
+            return
+        resize = not (self.isMaximized() or self.isFullScreen())
+        if visible:
+            if not self.file_browser.directory:
+                start = self.settings.file_browser_dir or self.demo_dir_edit.text()
+                if not self.file_browser.set_directory(start):
+                    self.file_browser.set_directory(Path.home())
+            self._width_before_browser = self.width() if resize else None
+            self._width_with_browser = None
+            if resize:
+                screen = self.screen().availableGeometry()
+                frame = self.frameGeometry().width() - self.width()
+                width = max(self.width(), min(self.width() + BROWSER_WIDTH, screen.width() - frame))
+                x = max(screen.left(), min(self.x(), screen.right() + 1 - width - frame))
+                self.resize(width, self.height())
+                if x != self.x():
+                    self.move(x, self.y())
+            self.browser_dock.show()
+            self.resizeDocks([self.browser_dock], [BROWSER_WIDTH], Qt.Orientation.Horizontal)
+            # Qt may widen the window further to fit the dock; note the final width once laid out.
+            QTimer.singleShot(0, self._note_browser_width)
+        else:
+            before = getattr(self, "_width_before_browser", None)
+            after = getattr(self, "_width_with_browser", None) or self.width()
+            self.browser_dock.hide()
+            if resize and before is not None:
+                # Back to the original width, keeping any resizing the user did meanwhile. Deferred
+                # until the layout has dropped the hidden dock's minimum width.
+                target = before + self.width() - after
+                QTimer.singleShot(0, lambda: self.resize(max(target, self.minimumSizeHint().width()),
+                                                         self.height()))
+            self._width_before_browser = None
+
+    def _note_browser_width(self) -> None:
+        if self.browser_dock.isVisible():
+            self._width_with_browser = self.width()
+
+    def _browser_add_mods(self, paths: list) -> None:
+        before = set(self.pwad_list.paths())
+        self.pwad_list.add_paths(paths)
+        added = [p for p in self.pwad_list.paths() if p not in before]
+        if added:
+            self._log("Added to mods: " + ", ".join(Path(p).name for p in added))
+        else:
+            self._log("Already in the mods list: " + ", ".join(Path(p).name for p in paths))
+
+    def _browser_use_iwad(self, path: str) -> None:
+        if self.iwad_combo.findData(path) < 0:
+            self.iwad_combo.addItem(Path(path).name, path)
+        self._select_data(self.iwad_combo, path)
+        self._save_state()
+        self._log(f"IWAD set to {Path(path).name}")
+
+    def _browser_play_demo(self, path: str) -> None:
+        self._start(self._current_options(playdemo=path))
+
     # ----------------------------------------------------------------- about
     def show_about(self) -> None:
         AboutDialog(self).exec()
@@ -1241,6 +1350,14 @@ class MainWindow(QMainWindow):
     def _log(self, text: str) -> None:
         if text:
             self.log.appendPlainText(text)
+
+
+class _BrowserDock(QDockWidget):
+    closed = Signal()
+
+    def closeEvent(self, event):
+        super().closeEvent(event)
+        self.closed.emit()
 
 
 class AboutDialog(QDialog):

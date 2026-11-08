@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import signal
 import sys
 
 from PySide6.QtCore import QTimer
@@ -39,8 +40,31 @@ def main() -> int:
         return _smoke_test(app)
     window = MainWindow()
     window.show()
+    install_interrupt_handler(app, window)
     QTimer.singleShot(0, window.startup)
     return app.exec()
+
+
+def install_interrupt_handler(app: QApplication, window=None) -> None:
+    """Quit cleanly (saving settings) on Ctrl+C in the terminal, or SIGTERM.
+
+    Python only runs signal handlers when the interpreter gets control, which never happens
+    while Qt's C++ event loop is idle; a short no-op timer hands control back regularly.
+    """
+
+    def handle(signum, _frame):
+        print(f"\n{signal.Signals(signum).name} received, quitting.", file=sys.stderr)
+        if window is not None:
+            window.close()  # saves settings
+        app.quit()
+
+    signal.signal(signal.SIGINT, handle)
+    if hasattr(signal, "SIGTERM"):
+        signal.signal(signal.SIGTERM, handle)
+    timer = QTimer(app)
+    timer.timeout.connect(lambda: None)
+    timer.start(200)
+    app._interrupt_timer = timer  # keep a reference
 
 
 def _smoke_test(app: QApplication) -> int:
