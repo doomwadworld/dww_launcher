@@ -327,6 +327,49 @@ def _parse_udmf(name: str, text: bytes) -> MapData:
     return m
 
 
+# ------------------------------------------------------------------ totals
+
+TOTAL_KEYS = ("things", "monsters", "secrets", "linedefs", "sidedefs", "vertices", "sectors")
+
+
+def map_counts(wad: WadFile, name: str, marker: int) -> dict[str, int]:
+    """Counts for one map. Binary maps are counted from lump sizes (only THINGS and SECTORS
+    are read, for monsters and secrets), so totals for big WADs stay quick."""
+    lumps = _map_lumps(wad, marker)
+    if "TEXTMAP" in lumps:
+        m = _parse_udmf(name, wad.read(lumps["TEXTMAP"]))
+        sizes = {"things": len(m.things), "linedefs": len(m.lines), "sidedefs": m.sidedefs,
+                 "vertices": len(m.vertices), "sectors": len(m.sector_specials)}
+    else:
+        hexen = "BEHAVIOR" in lumps
+        size = {k: wad.lumps[i].size for k, i in lumps.items()}
+        sizes = {"things": size.get("THINGS", 0) // (20 if hexen else 10),
+                 "linedefs": size.get("LINEDEFS", 0) // (16 if hexen else 14),
+                 "sidedefs": size.get("SIDEDEFS", 0) // 30, "vertices": size.get("VERTEXES", 0) // 4,
+                 "sectors": size.get("SECTORS", 0) // 26}
+        m = _parse_binary(name, {k: wad.read(lumps[k]) for k in ("THINGS", "SECTORS") if k in lumps}, hexen)
+    sizes["monsters"] = sum(1 for t in m.things if t.uv and t.single and t.type in MONSTERS)
+    sizes["secrets"] = m.secret_sectors
+    return sizes
+
+
+def wad_totals(wads: list[WadFile]) -> tuple[dict[str, int], tuple[str, int] | None]:
+    """Summed counts over every map in the given WADs, and the map with the most linedefs."""
+    totals = dict.fromkeys(TOTAL_KEYS, 0)
+    largest = None
+    for wad in wads:
+        for name, marker in find_maps(wad):
+            try:
+                counts = map_counts(wad, name, marker)
+            except (WadError, struct.error, ValueError, IndexError):
+                continue
+            for k in TOTAL_KEYS:
+                totals[k] += counts[k]
+            if largest is None or counts["linedefs"] > largest[1]:
+                largest = (name, counts["linedefs"])
+    return totals, largest
+
+
 # ------------------------------------------------------------------ statistics
 
 def map_stats(m: MapData) -> list[tuple[str, str]]:
