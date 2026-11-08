@@ -21,6 +21,8 @@ SKILLS = {
 
 # Common -complevel values understood by PrBoom+/DSDA-Doom and friends.
 COMPLEVELS = {
+    0: "Doom v1.2",
+    1: "Doom v1.666",
     2: "Doom / Doom II (v1.9)",
     3: "Ultimate Doom",
     4: "Final Doom",
@@ -41,8 +43,12 @@ class LaunchOptions:
     fast: bool = False
     respawn: bool = False
     nomonsters: bool = False
+    tas: bool = False
+    dsdademo: bool = False
     record: str | None = None  # demo path without extension; the port appends .lmp
     playdemo: str | None = None
+    timedemo: bool = False  # use -timedemo instead of -playdemo
+    skipsec: str | None = None  # seconds to skip during playback
     extra_args: str = ""
 
 
@@ -81,7 +87,9 @@ def build_args(opts: LaunchOptions) -> list[str]:
         args += ["-complevel", str(opts.complevel)]
 
     if opts.playdemo:
-        args += ["-playdemo", opts.playdemo]
+        args += ["-timedemo" if opts.timedemo else "-playdemo", opts.playdemo]
+        if opts.skipsec:
+            args += ["-skipsec", opts.skipsec]
     else:
         if opts.map:
             args += ["-warp", *warp_args(opts.map)]
@@ -93,6 +101,10 @@ def build_args(opts: LaunchOptions) -> list[str]:
             args.append("-respawn")
         if opts.nomonsters:
             args.append("-nomonsters")
+        if opts.tas:
+            args.append("-tas")
+        if opts.dsdademo:
+            args.append("-dsdademo")
         if opts.record:
             args += ["-record", opts.record]
 
