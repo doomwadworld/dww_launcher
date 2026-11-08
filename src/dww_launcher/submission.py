@@ -182,9 +182,30 @@ def text_warnings(text: str, combined_length: int) -> list[str]:
 # ----------------------------------------------------------------- output
 
 
-def submission_text(hall: str | None, why: str, comments: str) -> str:
-    """Line 1: HoF, HoS or N/A. Then the "Why?" text (if any), then the comments."""
-    parts = [hall or "N/A"]
+def identifier_line(text: str, result: Lookup) -> str:
+    """Spreadsheet ID and/or idgames path for the submission, e.g. ``12493 | levels/doom2/v-z/foo``.
+
+    The ID comes from the matched entry (DOOM 2 lists only); the path from what the user
+    entered, or from the matched DOOM 1 entry's link. ``N/A`` if neither is known.
+    """
+    text = text.strip()
+    entry = result.entry
+    parts = []
+    if entry and entry.entry_id:
+        parts.append(entry.entry_id)
+    elif text.isdigit():
+        parts.append(text)
+    if text and not text.isdigit():
+        parts.append(idgames_path(text))
+    elif entry and entry.sheet.link_column and entry.rows[0].get(entry.sheet.link_column):
+        parts.append(idgames_path(entry.rows[0][entry.sheet.link_column]))
+    return " | ".join(parts) or "N/A"
+
+
+def submission_text(identifier: str, hall: str | None, why: str, comments: str) -> str:
+    """Line 1: spreadsheet ID / idgames path. Line 2: HoF, HoS or N/A.
+    Then the "Why?" text (if any), then the comments."""
+    parts = [identifier or "N/A", hall or "N/A"]
     if why.strip():
         parts.append(why.strip())
     if comments.strip():
