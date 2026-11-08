@@ -861,3 +861,141 @@ def test_ctrl_c_quits(qapp, tmp_path):
         signal.signal(signal.SIGINT, old[0])
         signal.signal(signal.SIGTERM, old[1])
         qapp._interrupt_timer.stop()
+
+
+# ------------------------------------------------------------ map preview
+
+def _square_map():
+    from conftest import build_wad, doom_map_lumps
+    from dww_launcher.mapdata import load_map
+    from dww_launcher.wad import WadFile
+
+    return load_map(WadFile(build_wad("PWAD", doom_map_lumps())), "MAP01")
+
+
+@pytest.fixture
+def preview(qapp):
+    from dww_launcher.ui.map_view import MapPreview
+
+    pv = MapPreview()
+    pv.resize(400, 300)
+    pv.set_map(_square_map())
+    return pv
+
+
+def test_preview_layers_prepared(preview):
+    t = preview._things
+    assert len(t["monster"]) == 2 and len(t["player"]) == 1  # UV, single-player only
+    assert len(t["key"]) == 1 and len(t["weapon"]) == 1
+    assert preview.legend_entries() == [("exit", "exit")]
+    preview.grab()  # paints without errors with every layer on
+    for name in ("things", "keys", "weapons", "secrets"):
+        preview.set_layer(name, True)
+    preview.grab()
+
+
+def test_preview_zoom_keeps_point_under_cursor(preview):
+    from PySide6.QtCore import QPointF
+
+    anchor = QPointF(300, 100)
+    before = preview.screen_to_map(anchor)
+    preview.zoom_at(3.0, anchor)
+    assert preview.zoom == pytest.approx(3.0)
+    after = preview.screen_to_map(anchor)
+    assert (after.x(), after.y()) == pytest.approx((before.x(), before.y()), abs=1e-6)
+    preview.zoom_at(1e9)
+    assert preview.zoom == preview.MAX_ZOOM
+    preview.fit()
+    assert preview.zoom == 1.0 and not preview.zoomed_in
+
+
+def test_preview_wheel_and_drag(preview):
+    from PySide6.QtCore import QPoint, QPointF
+    from PySide6.QtGui import QWheelEvent
+    from PySide6.QtTest import QTest
+
+    ev = QWheelEvent(QPointF(200, 150), QPointF(200, 150), QPoint(0, 0), QPoint(0, 240),
+                     Qt.MouseButton.NoButton, Qt.KeyboardModifier.NoModifier, Qt.ScrollPhase.NoScrollPhase, False)
+    preview.wheelEvent(ev)
+    assert preview.zoom == pytest.approx(1.0015 ** 240)  # two notches, ~1.2x each
+    c0 = QPointF(preview.center)
+    QTest.mousePress(preview, Qt.MouseButton.LeftButton, pos=QPoint(200, 150))
+    QTest.mouseMove(preview, QPoint(150, 150))
+    QTest.mouseRelease(preview, Qt.MouseButton.LeftButton, pos=QPoint(150, 150))
+    assert preview.center.x() > c0.x()  # dragging left reveals more of the right side
+    QTest.mouseDClick(preview, Qt.MouseButton.LeftButton, pos=QPoint(10, 10))
+    assert preview.zoom == 1.0
+
+
+def test_preview_middle_click_autoscroll(preview):
+    from PySide6.QtCore import QPoint, QPointF
+    from PySide6.QtTest import QTest
+
+    QTest.mouseClick(preview, Qt.MouseButton.MiddleButton, pos=QPoint(200, 150))
+    assert preview._auto_anchor is None  # not zoomed in: nothing to scroll
+    preview.zoom_at(4.0)
+    QTest.mouseClick(preview, Qt.MouseButton.MiddleButton, pos=QPoint(200, 150))
+    assert preview._auto_anchor is not None and preview._auto_timer.isActive()  # click = stays on
+    c0 = QPointF(preview.center)
+    preview._auto_cursor = QPointF(200, 60)  # mouse above the marker -> scroll up
+    for _ in range(5):
+        preview._autoscroll_step()
+    assert preview.center.y() > c0.y() and preview.center.x() == pytest.approx(c0.x())
+    QTest.mouseClick(preview, Qt.MouseButton.LeftButton, pos=QPoint(200, 60))
+    assert preview._auto_anchor is None and not preview._auto_timer.isActive()
+
+
+def test_layer_toggles_and_popout(qapp, browse_dir):
+    from dww_launcher.ui.file_browser import FileBrowser
+
+    fb = FileBrowser()
+    fb.set_directory(browse_dir)
+    wait_for_scan(fb)
+    changes = []
+    fb.layers_changed.connect(changes.append)
+    select(fb, "MULTI.WAD")
+    fb.viewer.checks["things"].setChecked(True)
+    assert fb.preview.layers["things"] and changes[-1]["things"]
+
+    fb.pop_out_map()
+    win = fb.map_window
+    assert win is not None and win.isVisible()
+    assert win.viewer.preview.map.name == "MAP01" and win.viewer.layers() == fb.layers()
+    assert not win.viewer.popout_button.isVisibleTo(win)
+    fb.map_list.setCurrentRow(2)
+    assert win.viewer.preview.map.name == "MAP03" and "MAP03" in win.windowTitle()
+    win.viewer.checks["secrets"].setChecked(False)  # toggles stay in sync both ways
+    assert not fb.viewer.checks["secrets"].isChecked() and not fb.preview.layers["secrets"]
+    win.close()
+    assert fb.map_window is None
+    fb.stop()
+
+
+def test_browser_size_layout_and_layers_persist(qapp, browse_dir, tmp_path, monkeypatch):
+    s = Settings(demo_dir=str(tmp_path), file_browser_dir=str(browse_dir), auto_download=False,
+                 file_browser_width=410)
+    w = MainWindow(s)
+    requested = []
+    original = w.resizeDocks
+    monkeypatch.setattr(w, "resizeDocks", lambda docks, sizes, o: requested.append(sizes[0]) or original(docks, sizes, o))
+    w.show()
+    w.browser_action.setChecked(True)
+    qapp.processEvents()
+    assert requested == [410]  # opens at the remembered width
+
+    w.file_browser.main_split.setSizes([100, 300])
+    w.file_browser.viewer.checks["things"].setChecked(True)
+    w.file_browser.viewer.checks["keys"].setChecked(False)
+    w._save_state()
+    assert s.map_layers == {"things": True, "keys": False, "weapons": True, "secrets": True}
+    assert set(s.file_browser_state) == {"main_split", "maps_split", "right_split", "columns"}
+    assert s.file_browser_width == w.browser_dock.width()
+    sizes = w.file_browser.main_split.sizes()
+    w.file_browser.stop()
+
+    w2 = MainWindow(s)  # a new session restores layout and toggles
+    assert w2.file_browser.layers() == s.map_layers
+    w2.file_browser.main_split.resize(w.file_browser.main_split.size())
+    assert w2.file_browser.main_split.saveState() == w.file_browser.main_split.saveState()
+    assert sizes[0] < sizes[1]
+    w2.file_browser.stop()

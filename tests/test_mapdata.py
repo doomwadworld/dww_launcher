@@ -107,3 +107,31 @@ def test_real_freedoom_maps():
     assert stats(load_map(wad, "MAP30"))["Exit linedef"].startswith("No (ends when the Icon of Sin")
     for name, _ in maps:
         assert load_map(wad, name).lines
+
+
+def test_sector_outlines_and_side_sectors():
+    lumps = doom_map_lumps()
+    # Left half of the square is sector 0, right half (the secret) is sector 1; line 6 divides them.
+    sides = [0, 1, 1, 1, 0, 0, 0, 1]
+    sidedefs = b"".join(struct.pack("<hh8s8s8sH", 0, 0, b"-", b"-", b"-", s) for s in sides)
+    lumps = [(n, sidedefs if n == "SIDEDEFS" else d) for n, d in lumps]
+    m = load_map(WadFile(build_wad("PWAD", lumps)), "MAP01")
+    assert m.side_sectors == sides and m.sector_secret == [False, True]
+    for sector, corners in ((0, {0, 4, 5, 3}), (1, {4, 1, 2, 5})):
+        (loop,) = m.sector_outlines(sector)
+        assert loop[0] == loop[-1] and set(loop) == corners
+    assert m.sector_outlines(5) == []
+
+
+def test_sector_outline_open_chain():
+    """A damaged sector whose lines don't close still yields an outline to draw."""
+    m = load_map(WadFile(build_wad("PWAD", doom_map_lumps())), "MAP01")
+    m.side_sectors = [0, 0, 1, 0, 0, 0, 0, 1]  # sector 0 is missing its right edge
+    assert any(loop[0] != loop[-1] for loop in m.sector_outlines(0))
+
+
+def test_udmf_side_sectors():
+    lumps = [("MAP07", b""), ("TEXTMAP", UDMF), ("ENDMAP", b"")]
+    m = load_map(WadFile(build_wad("PWAD", lumps)), "MAP07")
+    assert m.side_sectors == [0, 0, 0] and m.sector_secret == [True, False]
+    assert m.lines[0].front == 0 and m.lines[1].back == 2

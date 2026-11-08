@@ -55,6 +55,19 @@ playing back and packaging demos.
   starts, line/side/vertex/sector counts and map size. Doom, Hexen and UDMF maps are supported.
   For files with several levels, a list of maps (with titles from UMAPINFO/MAPINFO) sits above
   the statistics.
+  - **Zoom** with the scroll wheel (around the cursor), **pan** by dragging with the left button,
+    **double-click** or **Fit** to see the whole map. When zoomed in, **middle-click** starts
+    autoscroll: move away from the marker to scroll that way, faster the further you go. Click
+    again, or release after holding, to stop.
+  - **Layer toggles**, whose icons double as the legend:
+    - **Things** (red monsters, green player start, grey everything else on UV single player)
+    - **Keys** (cards as squares, skull keys as diamonds, in their colours)
+    - **Weapons** (cyan triangles)
+    - **Secrets** (secret sectors filled purple)
+
+    Keys and weapons work independently of Things, so you can show only those.
+  - **⧉ Pop out** opens the preview in its own resizable window that follows the selected map.
+- The panel remembers its width, internal layout, column widths and layer toggles.
 
 ### Demo Submission tab
 
@@ -158,7 +171,8 @@ src/dww_launcher/
   lmp.py              demo (.lmp) parsing: formats, length, port footer
   mapdata.py          map geometry and statistics (Doom/Hexen/UDMF)
   fileinfo.py         file summaries and properties for the file browser
-  ui/file_browser.py  the file browser panel and map preview
+  ui/file_browser.py  the file browser panel
+  ui/map_view.py      interactive map preview (zoom, pan, layers, pop-out window)
   ui/main_window.py   the main window
 packaging/            PyInstaller spec and entry point
 scripts/make_icons.py regenerates the icon files from resources/icon_source.png

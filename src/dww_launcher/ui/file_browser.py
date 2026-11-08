@@ -6,8 +6,8 @@ import os
 from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QPointF, QRectF, QRunnable, Qt, QThreadPool, Signal
-from PySide6.QtGui import QAction, QColor, QPainter, QPen
+from PySide6.QtCore import QByteArray, QObject, QRunnable, Qt, QThreadPool, Signal
+from PySide6.QtGui import QAction, QColor
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -45,6 +45,7 @@ from dww_launcher.fileinfo import (
     summarize,
 )
 from dww_launcher.mapdata import MapData, map_stats
+from dww_launcher.ui.map_view import DEFAULT_LAYERS, MapViewer, MapWindow
 from dww_launcher.wad import WadError, WadFile
 
 COLUMNS = ["Name", "Type", "Levels / Map", "Game / IWAD", "Length", "Size", "Modified"]
@@ -84,76 +85,6 @@ class _ScanJob(QRunnable):
             self.signals.result.emit(self.generation, summarize(p))
 
 
-# ------------------------------------------------------------------ map preview
-
-class MapPreview(QWidget):
-    """Minimal automap-style drawing of a map's linedefs."""
-
-    BACKGROUND = QColor("#121212")
-    ONE_SIDED = QColor("#d8d8d8")
-    TWO_SIDED = QColor("#6a6a6a")
-    EXIT = QColor("#ff7a1a")
-    SECRET_EXIT = QColor("#c46bff")
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.map: MapData | None = None
-        self.message = "Select a file with levels"
-        self.setMinimumSize(160, 120)
-
-    def set_map(self, m: MapData | None, message: str = "") -> None:
-        self.map, self.message = m, message
-        self.update()
-
-    def paintEvent(self, _event):
-        p = QPainter(self)
-        p.fillRect(self.rect(), self.BACKGROUND)
-        m = self.map
-        if not m or not m.vertices or not m.lines:
-            p.setPen(QColor("#9a9a9a"))
-            p.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, self.message or "No geometry")
-            return
-        xs = [v[0] for v in m.vertices]
-        ys = [v[1] for v in m.vertices]
-        minx, maxx, miny, maxy = min(xs), max(xs), min(ys), max(ys)
-        w, h = max(maxx - minx, 1), max(maxy - miny, 1)
-        margin = 10
-        scale = min((self.width() - 2 * margin) / w, (self.height() - 2 * margin) / h)
-        ox = (self.width() - w * scale) / 2
-        oy = (self.height() - h * scale) / 2
-
-        def pt(i):
-            x, y = m.vertices[i]
-            return QPointF(ox + (x - minx) * scale, oy + (maxy - y) * scale)  # map Y points up
-
-        groups = {"two": [], "one": [], "exit": [], "secret": []}
-        n = len(m.vertices)
-        for line in m.lines:
-            if line.v1 >= n or line.v2 >= n:
-                continue
-            kind = m.exit_kind(line)
-            key = "secret" if kind == "secret" else "exit" if kind else "two" if line.two_sided else "one"
-            groups[key].append((pt(line.v1), pt(line.v2)))
-
-        p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        for key, color, width in (("two", self.TWO_SIDED, 1.0), ("one", self.ONE_SIDED, 1.0),
-                                  ("exit", self.EXIT, 2.5), ("secret", self.SECRET_EXIT, 2.5)):
-            if groups[key]:
-                p.setPen(QPen(color, width))
-                for a, b in groups[key]:
-                    p.drawLine(a, b)
-
-        legend = [(c, t) for key, c, t in (("exit", self.EXIT, "exit"), ("secret", self.SECRET_EXIT, "secret exit"))
-                  if groups[key]]
-        y = 6
-        for color, text in legend:
-            p.setPen(QPen(color, 2.5))
-            p.drawLine(QPointF(8, y + 7), QPointF(24, y + 7))
-            p.setPen(QColor("#cfcfcf"))
-            p.drawText(QRectF(30, y, 200, 14), Qt.AlignmentFlag.AlignVCenter, text)
-            y += 16
-
-
 # ------------------------------------------------------------------ panel
 
 def _property_tree() -> QTreeWidget:
@@ -175,6 +106,7 @@ class FileBrowser(QWidget):
     use_iwad = Signal(str)
     play_demo = Signal(str)
     directory_changed = Signal(str)
+    layers_changed = Signal(dict)
 
     def __init__(self, places=None, parent=None):
         super().__init__(parent)
@@ -185,6 +117,10 @@ class FileBrowser(QWidget):
         self._signals = _ScanSignals()
         self._signals.result.connect(self._on_result)
         self._detail_path: str | None = None
+        self._current_map: MapData | None = None
+        self._current_map_title = ""
+        self._map_message = "Select a file with levels"
+        self.map_window: MapWindow | None = None
         self.directory = ""
 
         layout = QVBoxLayout(self)
@@ -252,18 +188,21 @@ class FileBrowser(QWidget):
         self.detail_tree = _property_tree()
         self.tabs.addTab(self.detail_tree, "Detail")
 
-        self.preview = MapPreview()
+        self.viewer = MapViewer()
+        self.viewer.layers_changed.connect(self._on_layers_changed)
+        self.viewer.popout_requested.connect(self.pop_out_map)
+        self.preview = self.viewer.preview
         self.map_list = QListWidget()
         self.map_list.currentItemChanged.connect(self._on_map_selected)
         self.map_stats = _property_tree()
-        right = QSplitter(Qt.Orientation.Vertical)
+        self.right_split = right = QSplitter(Qt.Orientation.Vertical)
         right.addWidget(self.map_list)
         right.addWidget(self.map_stats)
         right.setStretchFactor(0, 1)
         right.setStretchFactor(1, 2)
         right.setChildrenCollapsible(False)
         self.maps_split = QSplitter(Qt.Orientation.Horizontal)
-        self.maps_split.addWidget(self.preview)
+        self.maps_split.addWidget(self.viewer)
         self.maps_split.addWidget(right)
         self.maps_split.setStretchFactor(0, 11)  # preview gets the larger share
         self.maps_split.setStretchFactor(1, 9)
@@ -272,7 +211,7 @@ class FileBrowser(QWidget):
         self.tabs.addTab(self.maps_split, "Maps")
         self.tabs.setTabVisible(1, False)
 
-        split = QSplitter(Qt.Orientation.Vertical)
+        self.main_split = split = QSplitter(Qt.Orientation.Vertical)
         split.addWidget(top)
         split.addWidget(self.tabs)
         split.setStretchFactor(0, 1)
@@ -497,7 +436,7 @@ class FileBrowser(QWidget):
             self.map_list.setCurrentRow(0)
             self._on_map_selected(self.map_list.item(0), None)
         else:
-            self.preview.set_map(None, "No levels")
+            self._show_map(None, "", "No levels")
             self.map_stats.clear()
 
     def _on_map_selected(self, item, _previous) -> None:
@@ -508,9 +447,10 @@ class FileBrowser(QWidget):
         try:
             m = read_map(self._detail_path, name)
         except Exception as exc:  # noqa: BLE001 - damaged map data must not break the panel
-            self.preview.set_map(None, f"Can't read {name}: {exc}")
+            self._show_map(None, name, f"Can't read {name}: {exc}")
             return
-        self.preview.set_map(m)
+        title = item.text().split("   ", 1)[1] if "   " in item.text() else ""
+        self._show_map(m, f"{Path(self._detail_path).name} - {name}" + (f" {title}" if title else ""))
         bold = self.map_stats.font()
         bold.setBold(True)
         title = QTreeWidgetItem([name, item.text().split("   ", 1)[1] if "   " in item.text() else ""])
@@ -520,3 +460,65 @@ class FileBrowser(QWidget):
             row = QTreeWidgetItem([key, value])
             row.setToolTip(1, value)
             self.map_stats.addTopLevelItem(row)
+
+    # -------------------------------------------------------------- map views
+    def _show_map(self, m: MapData | None, title: str, message: str = "") -> None:
+        self._current_map, self._current_map_title = m, title
+        self._map_message = message or "No levels"
+        self.viewer.set_map(m, message)
+        if self.map_window is not None:
+            self.map_window.show_map(m, title, message)
+
+    def pop_out_map(self) -> None:
+        """Show the current map in its own resizable window (kept in sync with the selection)."""
+        if self.map_window is None:
+            self.map_window = MapWindow(self.window())
+            self.map_window.viewer.layers_changed.connect(self._on_layers_changed)
+            self.map_window.closed.connect(self._on_map_window_closed)
+        self.map_window.viewer.set_layers(self.viewer.layers())
+        self.map_window.show_map(self._current_map, self._current_map_title,
+                                 "" if self._current_map else self._map_message)
+        self.map_window.show()
+        self.map_window.raise_()
+        self.map_window.activateWindow()
+
+    def _on_map_window_closed(self) -> None:
+        self.map_window = None
+
+    def _on_layers_changed(self, layers: dict) -> None:
+        for viewer in (self.viewer, self.map_window.viewer if self.map_window else None):
+            if viewer is not None and viewer.layers() != layers:
+                viewer.set_layers(layers)
+        self.layers_changed.emit(layers)
+
+    def layers(self) -> dict[str, bool]:
+        return self.viewer.layers()
+
+    def set_layers(self, layers: dict[str, bool]) -> None:
+        self.viewer.set_layers({**DEFAULT_LAYERS, **layers})
+
+    # -------------------------------------------------------------- persistence
+    def save_state(self) -> dict[str, str]:
+        """Splitter positions and column widths, as hex strings for the settings file."""
+        return {
+            "main_split": self.main_split.saveState().toHex().data().decode(),
+            "maps_split": self.maps_split.saveState().toHex().data().decode(),
+            "right_split": self.right_split.saveState().toHex().data().decode(),
+            "columns": self.table.horizontalHeader().saveState().toHex().data().decode(),
+        }
+
+    def restore_state(self, state: dict[str, str]) -> None:
+        targets = {"main_split": self.main_split.restoreState, "maps_split": self.maps_split.restoreState,
+                   "right_split": self.right_split.restoreState,
+                   "columns": self.table.horizontalHeader().restoreState}
+        for key, restore in targets.items():
+            value = state.get(key) if isinstance(state, dict) else None
+            if isinstance(value, str) and value:
+                try:
+                    restore(QByteArray.fromHex(value.encode()))
+                except (TypeError, ValueError):
+                    pass
+
+    def close_map_window(self) -> None:
+        if self.map_window is not None:
+            self.map_window.close()
