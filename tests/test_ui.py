@@ -13,7 +13,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 pytest.importorskip("PySide6")
 
 from PySide6.QtCore import QEventLoop, QTimer  # noqa: E402
-from PySide6.QtWidgets import QApplication, QFileDialog, QMessageBox  # noqa: E402
+from PySide6.QtWidgets import QApplication, QFileDialog, QInputDialog, QMessageBox  # noqa: E402
 
 from dww_launcher.config import Settings  # noqa: E402
 from dww_launcher.ui.main_window import MainWindow  # noqa: E402
@@ -50,6 +50,10 @@ def isolated_windows(qapp, monkeypatch, tmp_path):
     """
     monkeypatch.setattr(Settings, "save", lambda self, path=None: None)
     monkeypatch.setattr("dww_launcher.ui.main_window.sheets_dir", lambda: tmp_path / "sheets")
+    monkeypatch.setattr("dww_launcher.ui.main_window.profiles_dir", lambda: tmp_path / "profiles")
+    opened = []
+    monkeypatch.setattr("dww_launcher.ui.main_window.open_folder", lambda p: opened.append(str(p)) or True)
+    monkeypatch.setattr("dww_launcher.ui.main_window.open_url", lambda u: opened.append(u) or True)
     yield
     for w in QApplication.topLevelWidgets():
         w.close()
@@ -299,7 +303,7 @@ def test_create_text_and_zip(qapp, sheet_window, tmp_path, monkeypatch, no_dialo
     w.comments_edit.setPlainText("UV max.\nNo saves.")
 
     w._create_text_file()
-    assert (demo_dir / "zzsketch.txt").read_text() == "HoF\nGreat layouts\nUV max.\nNo saves.\n"
+    assert (demo_dir / "zzsketch.txt").read_text() == "12493\nHoF\nGreat layouts\nUV max.\nNo saves.\n"
 
     demos = []
     for i in (1, 2):
@@ -314,7 +318,7 @@ def test_create_text_and_zip(qapp, sheet_window, tmp_path, monkeypatch, no_dialo
     assert seen == [str(demo_dir / "zzsketch.zip")]
     with zipfile.ZipFile(demo_dir / "zzsketch.zip") as zf:
         assert sorted(zf.namelist()) == ["zzsketch.txt", "zzsketch_1.lmp", "zzsketch_2.lmp"]
-        assert zf.read("zzsketch.txt").decode().startswith("HoF\nGreat layouts\n")
+        assert zf.read("zzsketch.txt").decode().startswith("12493\nHoF\nGreat layouts\n")
 
 
 def test_package_button_moved(qapp, sheet_window):
@@ -476,3 +480,170 @@ def test_app_icon(qapp):
     assert not icon.isNull()
     sizes = {s.width() for s in icon.availableSizes()}
     assert {16, 32, 256} <= sizes
+
+
+
+# ------------------------------------------------------- text file folder
+
+def test_txt_dir_follows_demo_dir(qapp, sheet_window, tmp_path, monkeypatch, no_dialogs):
+    w = sheet_window
+    demo_dir = w.demo_dir_edit.text()
+    assert w.txt_same_check.isChecked()
+    assert w.txt_dir_edit.text() == demo_dir and not w.txt_dir_change.isEnabled()
+
+    other = tmp_path / "texts"
+    w.txt_same_check.setChecked(False)
+    assert w.txt_dir_change.isEnabled()
+    monkeypatch.setattr(QFileDialog, "getExistingDirectory", staticmethod(lambda *a, **k: str(other)))
+    w._choose_txt_dir()
+    assert w.txt_dir_edit.text() == str(other)
+
+    w.entry_edit.setText("12000")
+    w._create_text_file()
+    assert (other / "fresh.txt").read_text().startswith("12000\nN/A\n")
+    assert w.settings.txt_dir == str(other) and not w.settings.txt_dir_same_as_demo
+
+    new_demo = tmp_path / "newdemos"
+    monkeypatch.setattr(QFileDialog, "getExistingDirectory", staticmethod(lambda *a, **k: str(new_demo)))
+    w._choose_demo_dir()
+    assert w.txt_dir_edit.text() == str(other)  # not linked
+    w.txt_same_check.setChecked(True)
+    assert w.txt_dir_edit.text() == str(new_demo)
+    w.txt_same_check.setChecked(False)
+    assert w.txt_dir_edit.text() == str(other)  # custom folder remembered
+
+
+def test_open_buttons_use_safe_opener(qapp, sheet_window):
+    import dww_launcher.ui.main_window as mw
+
+    w = sheet_window
+    calls = []
+    mw.open_folder = lambda p: calls.append(p) or True  # (restored by monkeypatch fixture)
+    w._open_demo_dir()
+    w._open_folder(w.txt_dir_edit.text())
+    assert calls == [w.demo_dir_edit.text(), w.txt_dir_edit.text()]
+
+
+# --------------------------------------------------------------- profiles
+
+def test_profile_roundtrip(qapp, tmp_path, wad_factory, monkeypatch, no_dialogs):
+    iwad = wad_factory("doom2.wad", "IWAD", ["MAP01", "MAP02", "MAP03"])
+    pwad = wad_factory("zzsketch.wad", "PWAD", ["MAP01", "MAP02"])
+    port = tmp_path / "dsda-doom"
+    port.write_text("")
+    w = MainWindow(Settings(ports=[str(port)], iwads=[str(iwad)], demo_dir=str(tmp_path / "d"),
+                            auto_download=False))
+    w.pwad_list.add_paths([str(pwad)])
+    w.map_combo.setCurrentIndex(w.map_combo.findData("MAP02"))
+    w._select_data(w.skill_combo, 3)
+    w._select_data(w.complevel_combo, 9)
+    w.fast_check.setChecked(True)
+    w.tas_check.setChecked(True)
+    w.extra_edit.setText("-nomusic")
+    w.record_check.setChecked(True)
+    w.keep_latest_check.setChecked(True)
+    w.timedemo_check.setChecked(True)
+    w.skipsec_edit.setText("30")
+    w.txt_same_check.setChecked(False)
+    snapshot = w.capture_profile()
+    preview = w.command_preview.toPlainText()
+
+    monkeypatch.setattr(QInputDialog, "getText", staticmethod(lambda *a, **k: ("Speedrun: UV/Fast", True)))
+    w._save_profile_as()
+    assert w.current_profile == "Speedrun: UV/Fast"
+    assert "Speedrun: UV/Fast" in w.windowTitle()
+
+    # Change everything, then load the profile back.
+    w.pwad_list.clear()
+    w._refresh()
+    for c in w.flag_checks:
+        c.setChecked(False)
+    w.extra_edit.setText("")
+    w._select_data(w.complevel_combo, None)
+    w.record_check.setChecked(False)
+    w.load_profile_named("Speedrun: UV/Fast")
+
+    assert w.capture_profile() == snapshot
+    assert w.command_preview.toPlainText() == preview
+
+
+def test_profile_menu_and_delete(qapp, tmp_path, monkeypatch):
+    monkeypatch.setattr(QMessageBox, "question",
+                        staticmethod(lambda *a, **k: QMessageBox.StandardButton.Yes))
+    w = MainWindow(Settings(demo_dir=str(tmp_path), auto_download=False))
+    w._rebuild_profiles_menu()
+    texts = [a.text() for a in w.profiles_menu.actions()]
+    assert "Save Profile As…" in texts and "No saved profiles" in texts
+
+    w._save_profile("A")
+    w._save_profile("B")
+    w._rebuild_profiles_menu()
+    texts = [a.text() for a in w.profiles_menu.actions()]
+    assert 'Update "B"' in texts and "A" in texts and "B" in texts
+    assert [a for a in w.profiles_menu.actions() if a.text() == "B"][0].isChecked()
+
+    w._delete_profile("B")
+    assert w.current_profile is None
+    w._rebuild_profiles_menu()
+    assert "B" not in [a.text() for a in w.profiles_menu.actions()]
+
+
+def test_profile_missing_files_warned(qapp, tmp_path, no_dialogs):
+    from dww_launcher.profiles import Profile, save_profile
+
+    save_profile("old", Profile(iwad=str(tmp_path / "gone.wad"), pwads=[str(tmp_path / "gone2.wad")]),
+                 tmp_path / "profiles")
+    w = MainWindow(Settings(demo_dir=str(tmp_path), auto_download=False))
+    w.load_profile_named("old")
+    assert "gone.wad" in w.log.toPlainText() and "gone2.wad" in w.log.toPlainText()
+
+
+# ------------------------------------------------------------------ about
+
+def test_about_dialog(qapp, tmp_path):
+    import dww_launcher.ui.main_window as mw
+    from dww_launcher import __version__
+
+    w = MainWindow(Settings(demo_dir=str(tmp_path), auto_download=False))
+    dialog = mw.AboutDialog(w)
+    text = dialog.text.text()
+    assert f"Version {__version__}" in text
+    for url in ("https://www.youtube.com/@DOOMWADWorld", "https://discord.com/invite/aUsWnqaePy",
+                "https://github.com/doomwadworld/dww_launcher"):
+        assert url in text
+    opened = []
+    mw.open_url = lambda u: opened.append(u)  # restored by the fixture's monkeypatch
+    dialog.text.linkActivated.disconnect()
+    dialog.text.linkActivated.connect(lambda u: mw.open_url(u))
+    dialog.text.linkActivated.emit("https://discord.com/invite/aUsWnqaePy")
+    assert opened == ["https://discord.com/invite/aUsWnqaePy"]
+
+
+# ---------------------------------------------- clean child environment
+
+ENV_PORT = """\
+import os, sys
+print("CHILD LD_LIBRARY_PATH=" + os.environ.get("LD_LIBRARY_PATH", "<unset>"))
+print("CHILD QT_PLUGIN_PATH=" + os.environ.get("QT_PLUGIN_PATH", "<unset>"))
+"""
+
+
+def test_source_port_gets_clean_environment(qapp, tmp_path, wad_factory, monkeypatch, no_dialogs):
+    """A frozen build's bundled-Qt paths must not leak into the source port (or file manager)."""
+    if sys.platform == "win32":
+        pytest.skip("fake port uses a shebang script")
+    bundle = tmp_path / "bundle"
+    bundle.mkdir()
+    monkeypatch.setattr("dww_launcher.desktop.bundle_dir", lambda: str(bundle))
+    monkeypatch.setenv("LD_LIBRARY_PATH", f"{bundle}{os.pathsep}/usr/lib/custom")
+    monkeypatch.setenv("QT_PLUGIN_PATH", str(bundle / "PySide6" / "Qt" / "plugins"))
+    port = tmp_path / "envport"
+    port.write_text(f"#!{sys.executable}\n{ENV_PORT}")
+    port.chmod(0o755)
+    iwad = wad_factory("doom2.wad", "IWAD", ["MAP01"])
+    w = MainWindow(Settings(ports=[str(port)], iwads=[str(iwad)], demo_dir=str(tmp_path),
+                            auto_download=False))
+    run_game(w)
+    log = w.log.toPlainText()
+    assert "CHILD LD_LIBRARY_PATH=/usr/lib/custom" in log
+    assert "CHILD QT_PLUGIN_PATH=<unset>" in log

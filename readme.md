@@ -29,6 +29,10 @@ playing back and packaging demos.
   `<name>-NNNNN.lmp` attempt file and rename it to `<name>.lmp`.
 - **Demo playback** with `-playdemo` or `-timedemo`, plus optional `-skipsec <seconds>`.
 - Source port output is shown in the launcher. Settings are saved between sessions.
+- **Profiles** (toolbar): save every setting (except auto-download) as a named profile and load it
+  back later: port, IWAD, mods, map, skill, complevel, flags, extra args, demo options and
+  folders. Profiles are JSON files in a `profiles` folder inside the config directory.
+- **About** (toolbar): version and links to the YouTube channel, Discord and GitHub.
 
 ### Demo Submission tab
 
@@ -45,8 +49,12 @@ playing back and packaging demos.
   either box is checked.
 - **Comments** box. Both boxes share one `[characters]/4500` counter and warn about YouTube's
   5000-character description limit and its ban on angle brackets.
-- **Create Text File** writes `[zip file name].txt` to the demo folder:
-  line 1 is `HoF`, `HoS` or `N/A`, followed by the "Why?" text (if any), then the comments.
+- **Create Text File** writes `[zip file name].txt` to the text file folder, which can follow
+  the demo folder or be set separately. The file contains:
+  1. the spreadsheet ID and/or idgames path, e.g. `12493 | levels/doom2/v-z/zzsketch`
+  2. `HoF`, `HoS` or `N/A`
+  3. the "Why?" text (if any)
+  4. the comments
 - **Create Zip File…** zips the chosen demos together with that text file as `[zip file name].zip`.
 
 ### Spreadsheet data
@@ -123,6 +131,8 @@ src/dww_launcher/
   submission.py       spreadsheet lookup, comment checks, submission text/zip
   config.py           persistent settings (JSON in the OS config dir)
   icons.py            application icon (resources/)
+  desktop.py          starting other programs with a clean environment (file manager, browser)
+  profiles.py         named configuration profiles
   ui/main_window.py   the main window
 packaging/            PyInstaller spec and entry point
 scripts/make_icons.py regenerates the icon files from resources/icon_source.png
