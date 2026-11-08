@@ -66,8 +66,20 @@ def resolve_executable(port: str | Path) -> Path:
     return path
 
 
-def split_extra_args(text: str) -> list[str]:
-    return shlex.split(text, posix=sys.platform != "win32") if text.strip() else []
+def split_extra_args(text: str, windows: bool | None = None) -> list[str]:
+    """Split the extra-arguments box into arguments, honouring double quotes.
+
+    On Windows backslashes are path separators, not escapes, so non-POSIX splitting is
+    used and the surrounding quotes are removed afterwards.
+    """
+    if windows is None:
+        windows = sys.platform == "win32"
+    if not text.strip():
+        return []
+    if not windows:
+        return shlex.split(text)
+    parts = shlex.split(text, posix=False)
+    return [p[1:-1] if len(p) >= 2 and p[0] == p[-1] == '"' else p for p in parts]
 
 
 def build_args(opts: LaunchOptions) -> list[str]:

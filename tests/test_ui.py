@@ -12,8 +12,8 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 pytest.importorskip("PySide6")
 
-from PySide6.QtCore import QEventLoop, QTimer  # noqa: E402
-from PySide6.QtWidgets import QApplication, QFileDialog, QMessageBox  # noqa: E402
+from PySide6.QtCore import QEventLoop, Qt, QTimer  # noqa: E402
+from PySide6.QtWidgets import QApplication, QFileDialog, QInputDialog, QMessageBox  # noqa: E402
 
 from dww_launcher.config import Settings  # noqa: E402
 from dww_launcher.ui.main_window import MainWindow  # noqa: E402
@@ -50,6 +50,10 @@ def isolated_windows(qapp, monkeypatch, tmp_path):
     """
     monkeypatch.setattr(Settings, "save", lambda self, path=None: None)
     monkeypatch.setattr("dww_launcher.ui.main_window.sheets_dir", lambda: tmp_path / "sheets")
+    monkeypatch.setattr("dww_launcher.ui.main_window.profiles_dir", lambda: tmp_path / "profiles")
+    opened = []
+    monkeypatch.setattr("dww_launcher.ui.main_window.open_folder", lambda p: opened.append(str(p)) or True)
+    monkeypatch.setattr("dww_launcher.ui.main_window.open_url", lambda u: opened.append(u) or True)
     yield
     for w in QApplication.topLevelWidgets():
         w.close()
@@ -299,7 +303,7 @@ def test_create_text_and_zip(qapp, sheet_window, tmp_path, monkeypatch, no_dialo
     w.comments_edit.setPlainText("UV max.\nNo saves.")
 
     w._create_text_file()
-    assert (demo_dir / "zzsketch.txt").read_text() == "HoF\nGreat layouts\nUV max.\nNo saves.\n"
+    assert (demo_dir / "zzsketch.txt").read_text() == "12493\nHoF\nGreat layouts\nUV max.\nNo saves.\n"
 
     demos = []
     for i in (1, 2):
@@ -314,7 +318,7 @@ def test_create_text_and_zip(qapp, sheet_window, tmp_path, monkeypatch, no_dialo
     assert seen == [str(demo_dir / "zzsketch.zip")]
     with zipfile.ZipFile(demo_dir / "zzsketch.zip") as zf:
         assert sorted(zf.namelist()) == ["zzsketch.txt", "zzsketch_1.lmp", "zzsketch_2.lmp"]
-        assert zf.read("zzsketch.txt").decode().startswith("HoF\nGreat layouts\n")
+        assert zf.read("zzsketch.txt").decode().startswith("12493\nHoF\nGreat layouts\n")
 
 
 def test_package_button_moved(qapp, sheet_window):
@@ -476,3 +480,626 @@ def test_app_icon(qapp):
     assert not icon.isNull()
     sizes = {s.width() for s in icon.availableSizes()}
     assert {16, 32, 256} <= sizes
+
+
+
+# ------------------------------------------------------- text file folder
+
+def test_txt_dir_follows_demo_dir(qapp, sheet_window, tmp_path, monkeypatch, no_dialogs):
+    w = sheet_window
+    demo_dir = w.demo_dir_edit.text()
+    assert w.txt_same_check.isChecked()
+    assert w.txt_dir_edit.text() == demo_dir and not w.txt_dir_change.isEnabled()
+
+    other = tmp_path / "texts"
+    w.txt_same_check.setChecked(False)
+    assert w.txt_dir_change.isEnabled()
+    monkeypatch.setattr(QFileDialog, "getExistingDirectory", staticmethod(lambda *a, **k: str(other)))
+    w._choose_txt_dir()
+    assert w.txt_dir_edit.text() == str(other)
+
+    w.entry_edit.setText("12000")
+    w._create_text_file()
+    assert (other / "fresh.txt").read_text().startswith("12000\nN/A\n")
+    assert w.settings.txt_dir == str(other) and not w.settings.txt_dir_same_as_demo
+
+    new_demo = tmp_path / "newdemos"
+    monkeypatch.setattr(QFileDialog, "getExistingDirectory", staticmethod(lambda *a, **k: str(new_demo)))
+    w._choose_demo_dir()
+    assert w.txt_dir_edit.text() == str(other)  # not linked
+    w.txt_same_check.setChecked(True)
+    assert w.txt_dir_edit.text() == str(new_demo)
+    w.txt_same_check.setChecked(False)
+    assert w.txt_dir_edit.text() == str(other)  # custom folder remembered
+
+
+def test_open_buttons_use_safe_opener(qapp, sheet_window):
+    import dww_launcher.ui.main_window as mw
+
+    w = sheet_window
+    calls = []
+    mw.open_folder = lambda p: calls.append(p) or True  # (restored by monkeypatch fixture)
+    w._open_demo_dir()
+    w._open_folder(w.txt_dir_edit.text())
+    assert calls == [w.demo_dir_edit.text(), w.txt_dir_edit.text()]
+
+
+# --------------------------------------------------------------- profiles
+
+def test_profile_roundtrip(qapp, tmp_path, wad_factory, monkeypatch, no_dialogs):
+    iwad = wad_factory("doom2.wad", "IWAD", ["MAP01", "MAP02", "MAP03"])
+    pwad = wad_factory("zzsketch.wad", "PWAD", ["MAP01", "MAP02"])
+    port = tmp_path / "dsda-doom"
+    port.write_text("")
+    w = MainWindow(Settings(ports=[str(port)], iwads=[str(iwad)], demo_dir=str(tmp_path / "d"),
+                            auto_download=False))
+    w.pwad_list.add_paths([str(pwad)])
+    w.map_combo.setCurrentIndex(w.map_combo.findData("MAP02"))
+    w._select_data(w.skill_combo, 3)
+    w._select_data(w.complevel_combo, 9)
+    w.fast_check.setChecked(True)
+    w.tas_check.setChecked(True)
+    w.extra_edit.setText("-nomusic")
+    w.record_check.setChecked(True)
+    w.keep_latest_check.setChecked(True)
+    w.timedemo_check.setChecked(True)
+    w.skipsec_edit.setText("30")
+    w.txt_same_check.setChecked(False)
+    snapshot = w.capture_profile()
+    preview = w.command_preview.toPlainText()
+
+    monkeypatch.setattr(QInputDialog, "getText", staticmethod(lambda *a, **k: ("Speedrun: UV/Fast", True)))
+    w._save_profile_as()
+    assert w.current_profile == "Speedrun: UV/Fast"
+    assert "Speedrun: UV/Fast" in w.windowTitle()
+
+    # Change everything, then load the profile back.
+    w.pwad_list.clear()
+    w._refresh()
+    for c in w.flag_checks:
+        c.setChecked(False)
+    w.extra_edit.setText("")
+    w._select_data(w.complevel_combo, None)
+    w.record_check.setChecked(False)
+    w.load_profile_named("Speedrun: UV/Fast")
+
+    assert w.capture_profile() == snapshot
+    assert w.command_preview.toPlainText() == preview
+
+
+def test_profile_menu_and_delete(qapp, tmp_path, monkeypatch):
+    monkeypatch.setattr(QMessageBox, "question",
+                        staticmethod(lambda *a, **k: QMessageBox.StandardButton.Yes))
+    w = MainWindow(Settings(demo_dir=str(tmp_path), auto_download=False))
+    w._rebuild_profiles_menu()
+    texts = [a.text() for a in w.profiles_menu.actions()]
+    assert "Save Profile As…" in texts and "No saved profiles" in texts
+
+    w._save_profile("A")
+    w._save_profile("B")
+    w._rebuild_profiles_menu()
+    texts = [a.text() for a in w.profiles_menu.actions()]
+    assert 'Update "B"' in texts and "A" in texts and "B" in texts
+    assert [a for a in w.profiles_menu.actions() if a.text() == "B"][0].isChecked()
+
+    w._delete_profile("B")
+    assert w.current_profile is None
+    w._rebuild_profiles_menu()
+    assert "B" not in [a.text() for a in w.profiles_menu.actions()]
+
+
+def test_profile_missing_files_warned(qapp, tmp_path, no_dialogs):
+    from dww_launcher.profiles import Profile, save_profile
+
+    save_profile("old", Profile(iwad=str(tmp_path / "gone.wad"), pwads=[str(tmp_path / "gone2.wad")]),
+                 tmp_path / "profiles")
+    w = MainWindow(Settings(demo_dir=str(tmp_path), auto_download=False))
+    w.load_profile_named("old")
+    assert "gone.wad" in w.log.toPlainText() and "gone2.wad" in w.log.toPlainText()
+
+
+# ------------------------------------------------------------------ about
+
+def test_about_dialog(qapp, tmp_path):
+    import dww_launcher.ui.main_window as mw
+    from dww_launcher import __version__
+
+    w = MainWindow(Settings(demo_dir=str(tmp_path), auto_download=False))
+    dialog = mw.AboutDialog(w)
+    text = dialog.text.text()
+    assert f"Version {__version__}" in text
+    for url in ("https://www.youtube.com/@DOOMWADWorld", "https://discord.com/invite/aUsWnqaePy",
+                "https://github.com/doomwadworld/dww_launcher"):
+        assert url in text
+    opened = []
+    mw.open_url = lambda u: opened.append(u)  # restored by the fixture's monkeypatch
+    dialog.text.linkActivated.disconnect()
+    dialog.text.linkActivated.connect(lambda u: mw.open_url(u))
+    dialog.text.linkActivated.emit("https://discord.com/invite/aUsWnqaePy")
+    assert opened == ["https://discord.com/invite/aUsWnqaePy"]
+
+
+# ---------------------------------------------- clean child environment
+
+ENV_PORT = """\
+import os, sys
+print("CHILD LD_LIBRARY_PATH=" + os.environ.get("LD_LIBRARY_PATH", "<unset>"))
+print("CHILD QT_PLUGIN_PATH=" + os.environ.get("QT_PLUGIN_PATH", "<unset>"))
+"""
+
+
+def test_source_port_gets_clean_environment(qapp, tmp_path, wad_factory, monkeypatch, no_dialogs):
+    """A frozen build's bundled-Qt paths must not leak into the source port (or file manager)."""
+    if sys.platform == "win32":
+        pytest.skip("fake port uses a shebang script")
+    bundle = tmp_path / "bundle"
+    bundle.mkdir()
+    monkeypatch.setattr("dww_launcher.desktop.bundle_dir", lambda: str(bundle))
+    monkeypatch.setenv("LD_LIBRARY_PATH", f"{bundle}{os.pathsep}/usr/lib/custom")
+    monkeypatch.setenv("QT_PLUGIN_PATH", str(bundle / "PySide6" / "Qt" / "plugins"))
+    port = tmp_path / "envport"
+    port.write_text(f"#!{sys.executable}\n{ENV_PORT}")
+    port.chmod(0o755)
+    iwad = wad_factory("doom2.wad", "IWAD", ["MAP01"])
+    w = MainWindow(Settings(ports=[str(port)], iwads=[str(iwad)], demo_dir=str(tmp_path),
+                            auto_download=False))
+    run_game(w)
+    log = w.log.toPlainText()
+    assert "CHILD LD_LIBRARY_PATH=/usr/lib/custom" in log
+    assert "CHILD QT_PLUGIN_PATH=<unset>" in log
+
+
+# ------------------------------------------------------------ file browser
+
+DEMO_DIR = Path(__file__).parent / "data" / "demos"
+
+
+@pytest.fixture
+def browse_dir(tmp_path, mapwad):
+    import shutil
+    import zipfile
+
+    from conftest import build_wad, doom_map_lumps
+
+    d = tmp_path / "wads"
+    d.mkdir()
+    (d / "sub").mkdir()
+    mapwad("wads/MULTI.WAD", ["MAP01", "MAP02", "MAP03"], extra=[("UMAPINFO", b'map MAP02 { levelname = "Two" }')])
+    mapwad("wads/single.pwd", ["MAP07"])
+    mapwad("wads/game.wad", ["E1M1", "E1M2"], kind="IWAD")
+    with zipfile.ZipFile(d / "pack.Pk3", "w") as zf:
+        zf.writestr("maps/MAP04.wad", build_wad("PWAD", doom_map_lumps("MAP04")))
+    shutil.copy(DEMO_DIR / "dsda_cl9_boom.lmp", d / "RUN.LMP")
+    (d / "fix.deh").write_text("Doom version = 21\n")
+    (d / "readme.txt").write_text("no")
+    (d / "song.mp3").write_bytes(b"no")
+    return d
+
+
+def wait_for_scan(fb, timeout=5000):
+    from PySide6.QtCore import QElapsedTimer, QThreadPool
+
+    QThreadPool.globalInstance().waitForDone(timeout)
+    timer = QElapsedTimer()
+    timer.start()
+    while timer.elapsed() < 500:
+        QApplication.processEvents()
+
+
+def browser_rows(fb):
+    return {fb.table.item(r, 0).text().replace("📁 ", ""): [fb.table.item(r, c).text() for c in range(7)]
+            for r in range(fb.table.rowCount())}
+
+
+def select(fb, name):
+    for r in range(fb.table.rowCount()):
+        if fb.table.item(r, 0).text().endswith(name):
+            fb.table.clearSelection()
+            fb.table.selectRow(r)
+            return r
+    raise AssertionError(name)
+
+
+def test_browser_lists_doom_files(qapp, browse_dir):
+    from dww_launcher.ui.file_browser import FileBrowser
+
+    fb = FileBrowser()
+    fb.set_directory(browse_dir)
+    wait_for_scan(fb)
+    rows = browser_rows(fb)
+    assert set(rows) == {"sub", "MULTI.WAD", "single.pwd", "game.wad", "pack.Pk3", "RUN.LMP", "fix.deh"}
+    assert rows["MULTI.WAD"][1:4] == ["PWAD", "3", "Doom II"]
+    assert rows["game.wad"][1:4] == ["IWAD", "2", "Doom (shareware)"]
+    assert rows["pack.Pk3"][1:3] == ["PK3", "1"]
+    assert rows["RUN.LMP"][1:5] == ["Demo", "MAP01 UV", "freedoom2.wad", "0:04.49"]
+    assert fb.table.item(0, 0).text() == "📁 sub"  # folders first
+
+    fb.table.sortByColumn(5, Qt.SortOrder.DescendingOrder)  # size, numerically
+    sizes = [fb.table.item(r, 5).data(Qt.ItemDataRole.UserRole + 1) for r in range(fb.table.rowCount())]
+    assert sizes == sorted(sizes, reverse=True)
+    fb.stop()
+
+
+def test_browser_detail_and_maps_tabs(qapp, browse_dir):
+    from dww_launcher.ui.file_browser import FileBrowser
+
+    fb = FileBrowser()
+    fb.set_directory(browse_dir)
+    wait_for_scan(fb)
+
+    select(fb, "MULTI.WAD")
+    detail = [fb.detail_tree.topLevelItem(i).text(0).strip() for i in range(fb.detail_tree.topLevelItemCount())]
+    assert detail[:2] == ["General", "Name"] and "DOOM" in detail and "Levels" in detail
+    assert fb.tabs.isTabVisible(1)
+    assert [fb.map_list.item(i).text() for i in range(3)] == ["MAP01", "MAP02   Two", "MAP03"]
+    assert not fb.map_list.isHidden()
+    assert fb.preview.map.name == "MAP01" and fb.preview.map.lines
+    fb.map_list.setCurrentRow(1)
+    stats = {fb.map_stats.topLevelItem(i).text(0): fb.map_stats.topLevelItem(i).text(1)
+             for i in range(fb.map_stats.topLevelItemCount())}
+    assert stats["MAP02"] == "Two" and stats["Exit linedef"] == "Yes" and stats["Monsters (UV)"] == "2"
+
+    select(fb, "single.pwd")
+    assert fb.tabs.isTabVisible(1) and fb.map_list.isHidden()  # one map: no list needed
+
+    select(fb, "pack.Pk3")
+    assert fb.preview.map.name == "MAP04"
+
+    select(fb, "RUN.LMP")
+    assert not fb.tabs.isTabVisible(1)
+    detail = {fb.detail_tree.topLevelItem(i).text(0).strip(): fb.detail_tree.topLevelItem(i).text(1)
+              for i in range(fb.detail_tree.topLevelItemCount())}
+    assert detail["Format"] == "Boom 2.02" and detail["Length"] == "0:04.49 (157 tics)"
+    fb.stop()
+
+
+def test_browser_navigation(qapp, browse_dir):
+    from dww_launcher.ui.file_browser import FileBrowser
+
+    fb = FileBrowser(places=lambda: [("Demo folder", str(browse_dir))])
+    fb.set_directory(browse_dir)
+    wait_for_scan(fb)
+    fb._on_double_click(fb.table.item(select(fb, "sub"), 0))
+    assert fb.directory == str((browse_dir / "sub").resolve())
+    fb.go_up()
+    assert fb.directory == str(browse_dir.resolve())
+    assert not fb.set_directory(browse_dir / "missing")
+    fb._fill_places()
+    assert any("Demo folder" in a.text() for a in fb.places_menu.actions())
+    fb.stop()
+
+
+def test_browser_actions_reach_launcher(qapp, browse_dir, tmp_path, monkeypatch, no_dialogs):
+    w = MainWindow(Settings(demo_dir=str(tmp_path), file_browser_dir=str(browse_dir), auto_download=False))
+    started = []
+    monkeypatch.setattr(w, "_start", lambda opts: started.append(opts))
+    w.set_file_browser_visible(True)
+    fb = w.file_browser
+    wait_for_scan(fb)
+    assert fb.directory == str(browse_dir.resolve())
+
+    # Double-click: PWAD -> mods, IWAD -> IWAD, demo -> play
+    fb._on_double_click(fb.table.item(select(fb, "MULTI.WAD"), 0))
+    assert w.pwad_list.paths() == [str(browse_dir / "MULTI.WAD")]
+    assert w.map_combo.currentData() == "MAP01"  # first level of the added mod selected
+    fb._on_double_click(fb.table.item(select(fb, "game.wad"), 0))
+    assert w.iwad_combo.currentData() == str(browse_dir / "game.wad")
+    assert str(browse_dir / "game.wad") not in w.pwad_list.paths()
+    fb._on_double_click(fb.table.item(select(fb, "RUN.LMP"), 0))
+    assert started and started[0].playdemo == str(browse_dir / "RUN.LMP")
+
+    # Context menu with several files selected
+    fb.table.clearSelection()
+    for name in ("single.pwd", "pack.Pk3", "fix.deh", "game.wad"):
+        r = [r for r in range(fb.table.rowCount()) if fb.table.item(r, 0).text() == name][0]
+        fb.table.selectionModel().select(fb.table.model().index(r, 0),
+                                         fb.table.selectionModel().SelectionFlag.Select
+                                         | fb.table.selectionModel().SelectionFlag.Rows)
+    actions = {a.text(): a for a in fb.context_actions(fb.selected_paths())}
+    assert "Add to Mods (3)" in actions and "Use as IWAD" not in actions  # IWAD isn't a mod
+    actions["Add to Mods (3)"].trigger()
+    assert {Path(p).name for p in w.pwad_list.paths()} == {"MULTI.WAD", "single.pwd", "pack.Pk3", "fix.deh"}
+
+    select(fb, "game.wad")
+    assert "Use as IWAD" in {a.text() for a in fb.context_actions(fb.selected_paths())}
+    select(fb, "RUN.LMP")
+    assert "Play Demo" in {a.text() for a in fb.context_actions(fb.selected_paths())}
+
+
+def test_browser_window_grows_and_shrinks(qapp, tmp_path):
+    w = MainWindow(Settings(demo_dir=str(tmp_path), auto_download=False))
+    w.resize(700, 800)
+    w.show()
+    qapp.processEvents()
+    before = w.width()
+    w.browser_action.setChecked(True)
+    qapp.processEvents()
+    assert w.browser_dock.isVisible()
+    grown = w.width()
+    assert grown >= before
+    w.browser_action.setChecked(False)
+    qapp.processEvents()
+    assert not w.browser_dock.isVisible()
+    assert w.width() == before  # back to exactly the original width
+    w.browser_dock.close()  # closing via the dock's X keeps the toolbar button in sync
+    assert not w.browser_action.isChecked()
+
+
+def test_browser_state_is_saved(qapp, browse_dir, tmp_path):
+    s = Settings(demo_dir=str(tmp_path), file_browser_dir=str(browse_dir), file_browser_visible=True,
+                 auto_download=False)
+    w = MainWindow(s)
+    assert w.browser_action.isChecked()
+    w.file_browser.set_directory(browse_dir / "sub")
+    w._save_state()
+    assert s.file_browser_dir == str((browse_dir / "sub").resolve()) and s.file_browser_visible
+    w.file_browser.stop()
+
+
+# ------------------------------------------------------------------ Ctrl+C
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX signal delivery")
+def test_ctrl_c_quits(qapp, tmp_path):
+    import signal
+
+    from dww_launcher.app import install_interrupt_handler
+
+    saved = []
+    w = MainWindow(Settings(demo_dir=str(tmp_path), auto_download=False))
+    w.settings.save = lambda path=None: saved.append(True)
+    w.show()
+    old = signal.getsignal(signal.SIGINT), signal.getsignal(signal.SIGTERM)
+    try:
+        install_interrupt_handler(qapp, w)
+        QTimer.singleShot(100, lambda: os.kill(os.getpid(), signal.SIGINT))
+        QTimer.singleShot(5000, qapp.quit)  # safety net
+        timer = __import__("time").monotonic()
+        qapp.exec()
+        assert __import__("time").monotonic() - timer < 4  # quit by the signal, not the safety net
+        assert not w.isVisible() and saved  # window closed and settings saved
+    finally:
+        signal.signal(signal.SIGINT, old[0])
+        signal.signal(signal.SIGTERM, old[1])
+        qapp._interrupt_timer.stop()
+
+
+# ------------------------------------------------------------ map preview
+
+def _square_map():
+    from conftest import build_wad, doom_map_lumps
+    from dww_launcher.mapdata import load_map
+    from dww_launcher.wad import WadFile
+
+    return load_map(WadFile(build_wad("PWAD", doom_map_lumps())), "MAP01")
+
+
+@pytest.fixture
+def preview(qapp):
+    from dww_launcher.ui.map_view import MapPreview
+
+    pv = MapPreview()
+    pv.resize(400, 300)
+    pv.set_map(_square_map())
+    return pv
+
+
+def test_preview_layers_prepared(preview):
+    t = preview._things
+    assert len(t["monster"]) == 2 and len(t["player"]) == 1  # UV, single-player only
+    assert len(t["key"]) == 1 and len(t["weapon"]) == 1
+    assert preview.legend_entries() == [("exit", "exit")]
+    preview.grab()  # paints without errors with every layer on
+    for name in ("things", "keys", "weapons", "secrets"):
+        preview.set_layer(name, True)
+    preview.grab()
+
+
+def test_preview_zoom_keeps_point_under_cursor(preview):
+    from PySide6.QtCore import QPointF
+
+    anchor = QPointF(300, 100)
+    before = preview.screen_to_map(anchor)
+    preview.zoom_at(3.0, anchor)
+    assert preview.zoom == pytest.approx(3.0)
+    after = preview.screen_to_map(anchor)
+    assert (after.x(), after.y()) == pytest.approx((before.x(), before.y()), abs=1e-6)
+    preview.zoom_at(1e9)
+    assert preview.zoom == preview.MAX_ZOOM
+    preview.fit()
+    assert preview.zoom == 1.0 and not preview.zoomed_in
+
+
+def test_preview_wheel_and_drag(preview):
+    from PySide6.QtCore import QPoint, QPointF
+    from PySide6.QtGui import QWheelEvent
+    from PySide6.QtTest import QTest
+
+    ev = QWheelEvent(QPointF(200, 150), QPointF(200, 150), QPoint(0, 0), QPoint(0, 240),
+                     Qt.MouseButton.NoButton, Qt.KeyboardModifier.NoModifier, Qt.ScrollPhase.NoScrollPhase, False)
+    preview.wheelEvent(ev)
+    assert preview.zoom == pytest.approx(1.0015 ** 240)  # two notches, ~1.2x each
+    c0 = QPointF(preview.center)
+    QTest.mousePress(preview, Qt.MouseButton.LeftButton, pos=QPoint(200, 150))
+    QTest.mouseMove(preview, QPoint(150, 150))
+    QTest.mouseRelease(preview, Qt.MouseButton.LeftButton, pos=QPoint(150, 150))
+    assert preview.center.x() > c0.x()  # dragging left reveals more of the right side
+    QTest.mouseDClick(preview, Qt.MouseButton.LeftButton, pos=QPoint(10, 10))
+    assert preview.zoom == 1.0
+
+
+def test_preview_middle_click_autoscroll(preview):
+    from PySide6.QtCore import QPoint, QPointF
+    from PySide6.QtTest import QTest
+
+    QTest.mouseClick(preview, Qt.MouseButton.MiddleButton, pos=QPoint(200, 150))
+    assert preview._auto_anchor is None  # not zoomed in: nothing to scroll
+    preview.zoom_at(4.0)
+    QTest.mouseClick(preview, Qt.MouseButton.MiddleButton, pos=QPoint(200, 150))
+    assert preview._auto_anchor is not None and preview._auto_timer.isActive()  # click = stays on
+    c0 = QPointF(preview.center)
+    preview._auto_cursor = QPointF(200, 60)  # mouse above the marker -> scroll up
+    for _ in range(5):
+        preview._autoscroll_step()
+    assert preview.center.y() > c0.y() and preview.center.x() == pytest.approx(c0.x())
+    QTest.mouseClick(preview, Qt.MouseButton.LeftButton, pos=QPoint(200, 60))
+    assert preview._auto_anchor is None and not preview._auto_timer.isActive()
+
+
+def test_layer_toggles_and_popout(qapp, browse_dir):
+    from dww_launcher.ui.file_browser import FileBrowser
+
+    fb = FileBrowser()
+    fb.set_directory(browse_dir)
+    wait_for_scan(fb)
+    changes = []
+    fb.layers_changed.connect(changes.append)
+    select(fb, "MULTI.WAD")
+    fb.viewer.checks["things"].setChecked(True)
+    assert fb.preview.layers["things"] and changes[-1]["things"]
+
+    fb.pop_out_map()
+    win = fb.map_window
+    assert win is not None and win.isVisible()
+    assert win.viewer.preview.map.name == "MAP01" and win.viewer.layers() == fb.layers()
+    assert not win.viewer.popout_button.isVisibleTo(win)
+    fb.map_list.setCurrentRow(2)
+    assert win.viewer.preview.map.name == "MAP03" and "MAP03" in win.windowTitle()
+    win.viewer.checks["secrets"].setChecked(False)  # toggles stay in sync both ways
+    assert not fb.viewer.checks["secrets"].isChecked() and not fb.preview.layers["secrets"]
+    win.close()
+    assert fb.map_window is None
+    fb.stop()
+
+
+def test_browser_size_layout_and_layers_persist(qapp, browse_dir, tmp_path, monkeypatch):
+    s = Settings(demo_dir=str(tmp_path), file_browser_dir=str(browse_dir), auto_download=False,
+                 file_browser_width=410)
+    w = MainWindow(s)
+    requested = []
+    original = w.resizeDocks
+    monkeypatch.setattr(w, "resizeDocks", lambda docks, sizes, o: requested.append(sizes[0]) or original(docks, sizes, o))
+    w.show()
+    w.browser_action.setChecked(True)
+    qapp.processEvents()
+    assert requested == [410]  # opens at the remembered width
+
+    w.file_browser.main_split.setSizes([100, 300])
+    w.file_browser.viewer.checks["things"].setChecked(True)
+    w.file_browser.viewer.checks["keys"].setChecked(False)
+    w._save_state()
+    assert s.map_layers == {"things": True, "keys": False, "weapons": True, "secrets": True}
+    assert set(s.file_browser_state) == {"main_split", "maps_split", "right_split", "columns"}
+    # The width the user leaves the panel at is remembered; a width squeezed below the
+    # minimum (e.g. by a small screen) is not.
+    monkeypatch.setattr(w.browser_dock, "width", lambda: 450)
+    w._save_state()
+    assert s.file_browser_width == 450
+    monkeypatch.setattr(w.browser_dock, "width", lambda: 200)
+    w._save_state()
+    assert s.file_browser_width == 450
+    sizes = w.file_browser.main_split.sizes()
+    w.file_browser.stop()
+
+    w2 = MainWindow(s)  # a new session restores layout and toggles
+    assert w2.file_browser.layers() == s.map_layers
+    w2.file_browser.main_split.resize(w.file_browser.main_split.size())
+    assert w2.file_browser.main_split.saveState() == w.file_browser.main_split.saveState()
+    assert sizes[0] < sizes[1]
+    w2.file_browser.stop()
+
+
+# ------------------------------------------------------------ hover tooltips
+
+def test_hover_highlights_and_describes_things(preview):
+    from PySide6.QtCore import QEvent, QPoint, QPointF
+    from PySide6.QtGui import QHelpEvent
+    from PySide6.QtTest import QTest
+    from PySide6.QtWidgets import QToolTip
+
+    preview.set_layer("things", True)
+    preview.show()
+    imp = preview._things["monster"][0]
+    c = preview.map_to_screen(imp.x, imp.y)
+    assert [t.name for _, t in preview.markers_at(c)][:1] == ["Imp"]
+    assert preview.tooltip_for(c).startswith("Imp\nMonster · type 3001")
+
+    QTest.mouseMove(preview, c.toPoint())
+    assert [t for _, t in preview._hover][:1] == [imp]
+    preview.grab()  # paints the highlight without errors
+
+    preview.event(QHelpEvent(QEvent.Type.ToolTip, c.toPoint(), preview.mapToGlobal(c.toPoint())))
+    assert QToolTip.text().startswith("Imp")
+
+    far = QPoint(2, 2)
+    QTest.mouseMove(preview, far)
+    assert preview._hover == []
+    preview.usage_hint = "hint"
+    preview.event(QHelpEvent(QEvent.Type.ToolTip, far, preview.mapToGlobal(far)))
+    assert QToolTip.text() == "hint"
+
+    preview.set_layer("things", False)  # hidden things can't be hovered
+    assert preview.markers_at(c) == [] and preview._hover == []
+    key = preview._things["key"][0]
+    assert preview.tooltip_for(preview.map_to_screen(key.x, key.y)).startswith("Blue keycard\nKey")
+
+
+def test_hover_lists_stacked_things(qapp):
+    from dww_launcher.mapdata import MapData, Thing
+    from dww_launcher.ui.map_view import MapPreview
+
+    m = MapData("MAP01", "Doom", vertices=[(0, 0), (512, 512)])
+    m.lines = [__import__("dww_launcher.mapdata", fromlist=["Line"]).Line(0, 1, 0, False)]
+    m.things = [Thing(3001, 100, 100, True, True) for _ in range(5)]
+    pv = MapPreview()
+    pv.resize(300, 300)
+    pv.set_map(m)
+    pv.set_layer("things", True)
+    text = pv.tooltip_for(pv.map_to_screen(100, 100))
+    assert text.count("Imp") == 3 and text.endswith("…and 2 more here")
+
+
+# ------------------------------------------------------------ sprite icons
+
+def test_preview_uses_sprite_icons(qapp, preview):
+    from test_sprites import PALETTE_BYTES, patch
+
+    from conftest import build_wad
+    from dww_launcher.sprites import SpriteSource
+    from dww_launcher.wad import WadFile
+
+    pic = patch(8, 16, [[(0, [7] * 16)]] * 8)
+    wad = WadFile(build_wad("IWAD", [("PLAYPAL", PALETTE_BYTES), ("S_START", b""), ("TROOA1", pic),
+                                     ("BKEYA0", pic), ("S_END", b"")]))
+    m = preview.map
+    preview.set_map(m, sprites=SpriteSource([wad]))
+    preview.set_layer("things", True)
+    imp = preview._things["monster"][0]
+    assert preview.icon(3001) is not None and preview.icon(2001) is None  # no shotgun sprite: shape
+    assert preview.marker_radius("monster", imp) == preview.icon_box("monster") / 2
+    c = preview.map_to_screen(imp.x, imp.y)
+    assert preview.markers_at(c)[0][1] is imp
+    preview.grab()  # icons, fallback shapes and tokens all paint
+    preview.set_map(m, sprites=None)
+    assert preview.icon(3001) is None
+
+
+def test_browser_picks_sprite_wads(qapp, browse_dir):
+    from dww_launcher.ui.file_browser import FileBrowser
+
+    iwad = str(browse_dir / "game.wad")
+    fb = FileBrowser(sprite_iwads=lambda: [iwad])
+    pwad = str(browse_dir / "MULTI.WAD")
+    src = fb.sprites_for(pwad)
+    assert [w.name for w in src.wads] == ["MULTI.WAD", "game.wad"]  # the PWAD's own sprites first
+    assert [w.name for w in fb.sprites_for(iwad).wads] == ["game.wad"]
+    assert [w.name for w in fb.sprites_for(str(browse_dir / "pack.Pk3")).wads] == ["game.wad"]
+    assert fb.sprites_for(pwad) is src  # cached
+    assert FileBrowser().sprites_for(str(browse_dir / "pack.Pk3")) is None
+
+
+def test_launcher_offers_selected_iwad_first(qapp, tmp_path, wad_factory):
+    a = wad_factory("a.wad", "IWAD", ["MAP01"])
+    b = wad_factory("b.wad", "IWAD", ["E1M1"])
+    w = MainWindow(Settings(iwads=[str(a), str(b)], last_iwad=str(b), demo_dir=str(tmp_path),
+                            auto_download=False))
+    assert w._sprite_iwads() == [str(b), str(a)]
