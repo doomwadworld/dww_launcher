@@ -66,6 +66,9 @@ playing back and packaging demos.
     - **Secrets** (secret sectors filled purple)
 
     Keys and weapons work independently of Things, so you can show only those.
+  - **Hover** over a thing to highlight it and see a tooltip with its name, category and type
+    number, the skill levels it appears on, ambush/multiplayer-only flags, its position and
+    which way it faces. Things stacked on the same spot are listed together.
   - **⧉ Pop out** opens the preview in its own resizable window that follows the selected map.
 - The panel remembers its width, internal layout, column widths and layer toggles.
 

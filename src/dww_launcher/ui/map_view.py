@@ -5,11 +5,11 @@ from __future__ import annotations
 import math
 import time
 
-from PySide6.QtCore import QLineF, QPointF, QRectF, QSize, Qt, QTimer, Signal
+from PySide6.QtCore import QEvent, QLineF, QPointF, QRectF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QBrush, QColor, QIcon, QPainter, QPainterPath, QPen, QPixmap, QPolygonF
-from PySide6.QtWidgets import QCheckBox, QHBoxLayout, QSizePolicy, QToolButton, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QCheckBox, QHBoxLayout, QSizePolicy, QToolButton, QToolTip, QVBoxLayout, QWidget
 
-from dww_launcher.mapdata import DEATHMATCH_START, KEYS, MONSTERS, WEAPONS, MapData
+from dww_launcher.mapdata import DEATHMATCH_START, KEYS, MONSTERS, WEAPONS, MapData, Thing
 
 LAYERS = ("things", "keys", "weapons", "secrets")
 DEFAULT_LAYERS = {"things": False, "keys": True, "weapons": True, "secrets": True}
@@ -53,6 +53,8 @@ class MapPreview(QWidget):
         self._lines: dict[str, list[QLineF]] = {}
         self._secret_path = QPainterPath()
         self._things: dict[str, list] = {}
+        self._hover: list[tuple[str, Thing]] = []  # markers under the mouse
+        self.usage_hint = ""  # tooltip shown when not over a thing
         self._drag = None  # (start pos, start center)
         self._auto_anchor: QPointF | None = None
         self._auto_cursor = QPointF()
@@ -68,6 +70,7 @@ class MapPreview(QWidget):
     def set_map(self, m: MapData | None, message: str = "") -> None:
         self.map, self.message = m, message
         self._lines, self._things, self._secret_path = {}, {}, QPainterPath()
+        self._hover = []
         if m and m.vertices:
             xs = [v[0] for v in m.vertices]
             ys = [v[1] for v in m.vertices]
@@ -100,25 +103,62 @@ class MapPreview(QWidget):
                         path.closeSubpath()
         self._secret_path = path
 
-        things = {"monster": [], "player": [], "other": [], "key": [], "weapon": []}
+        things: dict[str, list[Thing]] = {"monster": [], "player": [], "other": [], "key": [], "weapon": []}
         for t in m.things:
             if t.type in KEYS:  # keys are shown whatever their skill flags
-                things["key"].append((t.x, t.y, t.type))
+                things["key"].append(t)
             elif not (t.uv and t.single):
                 continue
             elif t.type in WEAPONS:
-                things["weapon"].append((t.x, t.y))
+                things["weapon"].append(t)
             elif t.type in MONSTERS:
-                things["monster"].append((t.x, t.y))
+                things["monster"].append(t)
             elif t.type == 1:
-                things["player"].append((t.x, t.y))
+                things["player"].append(t)
             elif t.type not in (2, 3, 4, DEATHMATCH_START):
-                things["other"].append((t.x, t.y))
+                things["other"].append(t)
         self._things = things
 
     def set_layer(self, name: str, visible: bool) -> None:
         self.layers[name] = visible
+        self._hover = []
         self.update()
+
+    # ---------------------------------------------------------------- markers
+    # (layer, kind) in drawing order; later entries are drawn on top.
+    _MARKER_ORDER = (("things", "other"), ("things", "monster"), ("things", "player"),
+                     ("weapons", "weapon"), ("keys", "key"))
+
+    def _marker_base(self) -> float:
+        return min(max(16 * self.scale, 2.5), 8.0)
+
+    def marker_radius(self, kind: str) -> float:
+        base = self._marker_base()
+        return {"other": base * 0.7, "monster": base, "player": base}.get(kind, base + 2)
+
+    def visible_markers(self) -> list[tuple[str, Thing]]:
+        """(kind, thing) for every marker currently drawn, bottom to top."""
+        return [(kind, t) for layer, kind in self._MARKER_ORDER if self.layers.get(layer)
+                for t in self._things.get(kind, ())]
+
+    def markers_at(self, pos: QPointF, slop: float = 3.0) -> list[tuple[str, Thing]]:
+        """Markers under a screen position, topmost first."""
+        hits = []
+        for kind, t in reversed(self.visible_markers()):
+            c = self.map_to_screen(t.x, t.y)
+            d = math.hypot(c.x() - pos.x(), c.y() - pos.y())
+            if d <= self.marker_radius(kind) + slop:
+                hits.append((kind, t))
+        return hits
+
+    def tooltip_for(self, pos: QPointF) -> str:
+        hits = self.markers_at(pos)
+        if not hits:
+            return ""
+        text = "\n\n".join(t.describe() for _, t in hits[:3])
+        if len(hits) > 3:
+            text += f"\n\n…and {len(hits) - 3} more here"
+        return text
 
     # ---------------------------------------------------------------- view
     def _base_scale(self) -> float:
@@ -211,7 +251,37 @@ class MapPreview(QWidget):
             self.update()
         elif self._auto_anchor is not None:
             self._auto_cursor = event.position()
+        else:
+            hover = self.markers_at(event.position())
+            if [id(t) for _, t in hover] != [id(t) for _, t in self._hover]:
+                self._hover = hover
+                if not hover:
+                    QToolTip.hideText()
+                self.update()
         event.accept()
+
+    def leaveEvent(self, event):
+        if self._hover:
+            self._hover = []
+            self.update()
+        super().leaveEvent(event)
+
+    def event(self, event):
+        if event.type() == QEvent.Type.ToolTip:
+            pos = QPointF(event.pos())
+            text = self.tooltip_for(pos) if self._drag is None and self._auto_anchor is None else ""
+            if text:
+                kind, t = self.markers_at(pos)[0]
+                c = self.map_to_screen(t.x, t.y)
+                r = self.marker_radius(kind) + 3
+                area = QRectF(c.x() - r, c.y() - r, 2 * r, 2 * r).toAlignedRect()
+                QToolTip.showText(event.globalPos(), text, self, area)
+            elif self.usage_hint:
+                QToolTip.showText(event.globalPos(), self.usage_hint, self)
+            else:
+                QToolTip.hideText()
+            return True
+        return super().event(event)
 
     def mouseReleaseEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton and self._drag is not None:
@@ -281,38 +351,43 @@ class MapPreview(QWidget):
         p.restore()
 
         # Things are drawn in screen space so markers stay readable at any zoom.
-        size = min(max(16 * s, 2.5), 8.0)
-        outline = QPen(QColor(0, 0, 0, 200), 1)
-        if self.layers.get("things"):
-            p.setPen(Qt.PenStyle.NoPen)
-            for key, color in (("other", self.OTHER), ("monster", self.MONSTER), ("player", self.PLAYER)):
-                p.setBrush(color)
-                r = size * (0.7 if key == "other" else 1.0)
-                for x, y in self._things.get(key, ()):
-                    p.drawEllipse(self.map_to_screen(x, y), r, r)
-        if self.layers.get("weapons"):
-            p.setPen(outline)
-            p.setBrush(self.WEAPON)
-            r = size + 2
-            for x, y in self._things.get("weapon", ()):
-                c = self.map_to_screen(x, y)
-                p.drawPolygon(QPolygonF([QPointF(c.x(), c.y() - r), QPointF(c.x() + r * 0.9, c.y() + r * 0.7),
-                                         QPointF(c.x() - r * 0.9, c.y() + r * 0.7)]))
-        if self.layers.get("keys"):
-            p.setPen(outline)
-            r = size + 2
-            for x, y, ttype in self._things.get("key", ()):
-                c = self.map_to_screen(x, y)
-                p.setBrush(QColor(KEY_COLORS[ttype]))
-                if ttype in SKULL_KEYS:
-                    p.drawPolygon(QPolygonF([QPointF(c.x(), c.y() - r), QPointF(c.x() + r, c.y()),
-                                             QPointF(c.x(), c.y() + r), QPointF(c.x() - r, c.y())]))
-                else:
-                    p.drawRect(QRectF(c.x() - r * 0.75, c.y() - r * 0.75, r * 1.5, r * 1.5))
+        for kind, t in self.visible_markers():
+            self._draw_marker(p, kind, t, self.map_to_screen(t.x, t.y), self.marker_radius(kind))
+        visible = {id(t) for _, t in self.visible_markers()}
+        for kind, t in self._hover:
+            if id(t) in visible:  # hovered: glow, ring and a slightly larger marker on top
+                c = self.map_to_screen(t.x, t.y)
+                r = self.marker_radius(kind)
+                p.setPen(Qt.PenStyle.NoPen)
+                p.setBrush(QColor(255, 255, 255, 60))
+                p.drawEllipse(c, r + 7, r + 7)
+                p.setPen(QPen(QColor(255, 255, 255, 235), 2))
+                p.setBrush(Qt.BrushStyle.NoBrush)
+                p.drawEllipse(c, r + 4, r + 4)
+                self._draw_marker(p, kind, t, c, r * 1.3)
 
         self._paint_legend(p)
         if self._auto_anchor is not None:
             self._paint_autoscroll_marker(p, self._auto_anchor)
+
+    def _draw_marker(self, p: QPainter, kind: str, t: Thing, c: QPointF, r: float) -> None:
+        if kind in ("other", "monster", "player"):
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush({"other": self.OTHER, "monster": self.MONSTER, "player": self.PLAYER}[kind])
+            p.drawEllipse(c, r, r)
+            return
+        p.setPen(QPen(QColor(0, 0, 0, 200), 1))
+        if kind == "weapon":
+            p.setBrush(self.WEAPON)
+            p.drawPolygon(QPolygonF([QPointF(c.x(), c.y() - r), QPointF(c.x() + r * 0.9, c.y() + r * 0.7),
+                                     QPointF(c.x() - r * 0.9, c.y() + r * 0.7)]))
+        elif kind == "key":
+            p.setBrush(QColor(KEY_COLORS[t.type]))
+            if t.type in SKULL_KEYS:
+                p.drawPolygon(QPolygonF([QPointF(c.x(), c.y() - r), QPointF(c.x() + r, c.y()),
+                                         QPointF(c.x(), c.y() + r), QPointF(c.x() - r, c.y())]))
+            else:
+                p.drawRect(QRectF(c.x() - r * 0.75, c.y() - r * 0.75, r * 1.5, r * 1.5))
 
     def legend_entries(self) -> list[tuple[str, str]]:
         """(kind, label) rows for the small in-map legend.
@@ -458,8 +533,9 @@ class MapViewer(QWidget):
         bar_widget.setMinimumWidth(0)
         layout.addWidget(bar_widget)
         self.preview = MapPreview()
-        self.preview.setToolTip("Scroll to zoom · drag to pan · double-click to fit\n"
-                                "Middle-click when zoomed in to autoscroll")
+        self.preview.usage_hint = ("Scroll to zoom · drag to pan · double-click to fit\n"
+                                   "Middle-click when zoomed in to autoscroll\n"
+                                   "Hover over a thing to see what it is")
         self.fit_button.clicked.connect(self.preview.fit)
         layout.addWidget(self.preview, 1)
 
