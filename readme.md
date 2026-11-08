@@ -66,6 +66,10 @@ playing back and packaging demos.
     - **Secrets** (secret sectors filled purple)
 
     Keys and weapons work independently of Things, so you can show only those.
+  - **Sprites:** things are drawn with their own pictures, read from your IWAD (the selected
+    one first, then your other IWADs for anything missing) and from the WAD being previewed, so
+    custom sprites show up too. Nothing is bundled with the launcher. Monsters and player starts
+    appear as face close-ups on red or green tiles. Without an IWAD the plain shapes are used.
   - **Hover** over a thing to highlight it and see a tooltip with its name, category and type
     number, the skill levels it appears on, ambush/multiplayer-only flags, its position and
     which way it faces. Things stacked on the same spot are listed together.
@@ -173,6 +177,7 @@ src/dww_launcher/
   profiles.py         named configuration profiles
   lmp.py              demo (.lmp) parsing: formats, length, port footer
   mapdata.py          map geometry and statistics (Doom/Hexen/UDMF)
+  sprites.py          Doom picture decoding and thing sprites from the user's WADs
   fileinfo.py         file summaries and properties for the file browser
   ui/file_browser.py  the file browser panel
   ui/map_view.py      interactive map preview (zoom, pan, layers, pop-out window)
