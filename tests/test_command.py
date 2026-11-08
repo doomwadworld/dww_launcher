@@ -1,9 +1,19 @@
-from dww_launcher.command import LaunchOptions, build_args, build_command, resolve_executable
+from pathlib import Path
+
+import pytest
+
+from dww_launcher.command import (
+    LaunchOptions,
+    build_args,
+    build_command,
+    resolve_executable,
+    split_extra_args,
+)
 
 
 def test_basic_args():
     opts = LaunchOptions(port="/ports/dsda-doom", iwad="/iwads/doom2.wad")
-    assert build_command(opts) == ["/ports/dsda-doom", "-iwad", "/iwads/doom2.wad"]
+    assert build_command(opts) == [str(Path("/ports/dsda-doom")), "-iwad", "/iwads/doom2.wad"]
 
 
 def test_full_args():
@@ -65,3 +75,15 @@ def test_timedemo_and_skipsec():
     opts.timedemo = False
     opts.skipsec = None
     assert build_args(opts) == ["-iwad", "doom2.wad", "-playdemo", "d.lmp"]
+
+
+@pytest.mark.parametrize("windows", [False, True])
+def test_split_extra_args_quotes(windows):
+    assert split_extra_args('-nomusic -config "my config.cfg"', windows=windows) == \
+        ["-nomusic", "-config", "my config.cfg"]
+    assert split_extra_args("   ", windows=windows) == []
+
+
+def test_split_extra_args_windows_backslashes():
+    assert split_extra_args(r'-config C:\Doom\dsda.cfg -file "C:\My Wads\x.wad"', windows=True) == \
+        ["-config", r"C:\Doom\dsda.cfg", "-file", r"C:\My Wads\x.wad"]

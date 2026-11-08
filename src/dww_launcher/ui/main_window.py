@@ -980,7 +980,7 @@ class MainWindow(QMainWindow):
             return
         try:
             target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(self._submission_text(), encoding="utf-8")
+            target.write_text(self._submission_text(), encoding="utf-8", newline="\n")
         except OSError as exc:
             QMessageBox.warning(self, "Could not write file", str(exc))
             return
