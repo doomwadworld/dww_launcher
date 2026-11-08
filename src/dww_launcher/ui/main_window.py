@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import html
+from datetime import datetime, timezone
 from pathlib import Path
 
 from PySide6.QtCore import QProcess, QRegularExpression, Qt, QUrl, Signal
-from PySide6.QtGui import QDesktopServices, QFontDatabase, QRegularExpressionValidator
+from PySide6.QtGui import QAction, QDesktopServices, QFontDatabase, QRegularExpressionValidator
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -15,15 +17,18 @@ from PySide6.QtWidgets import (
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
-    QInputDialog,
     QLabel,
     QLineEdit,
     QListWidget,
     QListWidgetItem,
     QMainWindow,
+    QMenu,
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
+    QSplitter,
+    QTabWidget,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -41,9 +46,19 @@ from dww_launcher.demo import (
     auto_demo_name,
     consolidate_attempts,
     default_package_name,
-    package_demos,
     recorded_files,
     strip_lmp,
+)
+from dww_launcher.sheet_download import SheetDownloader
+from dww_launcher.sheets import download_due, load_sheets, parse_timestamp, save_sheets, sheets_dir
+from dww_launcher.submission import (
+    COMMENT_LIMIT,
+    Lookup,
+    create_submission_zip,
+    ensure_suffix,
+    lookup,
+    submission_text,
+    text_warnings,
 )
 from dww_launcher.wad import WadError, WadInfo, file_date, is_v12_era, map_sort_key, read_wad
 
@@ -62,6 +77,15 @@ KEEP_LATEST_TOOLTIP = (
     "When enabled, after the game exits all of these are deleted except the most\n"
     "recent one, which is then renamed to <demo name>.lmp."
 )
+AUTO_DOWNLOAD_PROMPT = (
+    "DWW Launcher can download the latest WAD and source port lists from the DWW spreadsheet "
+    "automatically.\n\nIf you turn this on, it downloads them when the launcher starts, at most "
+    "once every 12 hours.\n\nYou can change this later under Options → Auto-Download Spreadsheet Data."
+    "\n\nTurn on automatic downloads?"
+)
+ZIP_TOOLTIP = "Choose demos and zip them together with the text file"
+TXT_TOOLTIP = "Write the text file to the demo folder"
+ENTRY_PLACEHOLDER = "e.g. 12493, https://www.doomworld.com/idgames/levels/doom2/a-c/zzsketch, levels/doom/Ports/a-c/foo"
 
 
 class PwadList(QListWidget):
@@ -115,9 +139,17 @@ class PwadList(QListWidget):
 
 
 class MainWindow(QMainWindow):
-    def __init__(self, settings: Settings | None = None):
+    def __init__(self, settings: Settings | None = None, sheet_dir: Path | None = None,
+                 sheet_urls: dict[str, str] | None = None):
         super().__init__()
         self.settings = settings if settings is not None else Settings.load()
+        self._sheet_dir = sheet_dir or sheets_dir()
+        self._sheet_data = load_sheets(self._sheet_dir)
+        self._lookup = Lookup()
+        self._auto_txt_name = ""
+        self._manual_download = False
+        self._downloader = SheetDownloader(urls=sheet_urls, parent=self)
+        self._downloader.finished.connect(self._on_sheets_downloaded)
         self.process: QProcess | None = None
         self._running_opts: LaunchOptions | None = None
         self._running_keep_latest = False
@@ -127,18 +159,19 @@ class MainWindow(QMainWindow):
         self._setting_complevel = False
 
         self.setWindowTitle("Doom WAD World Launcher")
-        self.resize(840, 860)
+        self.resize(860, 940)
         self._build_ui()
         self._restore_state()
         self._refresh()
 
     # ----------------------------------------------------------------- layout
     def _build_ui(self) -> None:
-        central = QWidget()
-        root = QVBoxLayout(central)
+        self._build_toolbar()
+        game_tab = QWidget()
+        root = QVBoxLayout(game_tab)
 
         # Game setup ---------------------------------------------------------
-        setup = QGroupBox("Game")
+        setup = QGroupBox("Source port and WADs")
         form = QFormLayout(setup)
 
         self.port_combo = QComboBox()
@@ -248,12 +281,9 @@ class MainWindow(QMainWindow):
         play.clicked.connect(self._play_demo)
         self.timedemo_check = QCheckBox("Use -timedemo")
         self.timedemo_check.setToolTip("Play back with -timedemo (benchmark mode) instead of -playdemo")
-        pkg = QPushButton("Package demo(s)…")
-        pkg.clicked.connect(self._package_existing_demos)
         play_row.addWidget(play)
         play_row.addWidget(self.timedemo_check)
         play_row.addStretch()
-        play_row.addWidget(pkg)
         dform.addRow(play_row)
 
         self.skipsec_edit = QLineEdit()
@@ -290,12 +320,23 @@ class MainWindow(QMainWindow):
         launch_row.addWidget(self.launch_button)
         root.addLayout(launch_row)
 
+        root.addStretch()
+
         self.log = QPlainTextEdit()
         self.log.setReadOnly(True)
         self.log.setFont(mono)
-        self.log.setPlaceholderText("Source port output appears here.")
-        root.addWidget(self.log, 1)
+        self.log.setPlaceholderText("Source port output and messages appear here.")
+        self.log.setMinimumHeight(90)
 
+        self.tabs = QTabWidget()
+        self.tabs.addTab(game_tab, "Game")
+        self.tabs.addTab(self._build_submission_tab(), "Demo Submission")
+        central = QSplitter(Qt.Orientation.Vertical)
+        central.addWidget(self.tabs)
+        central.addWidget(self.log)
+        central.setStretchFactor(0, 4)
+        central.setStretchFactor(1, 1)
+        central.setChildrenCollapsible(False)
         self.setCentralWidget(central)
 
         # Any change refreshes the preview.
@@ -308,6 +349,110 @@ class MainWindow(QMainWindow):
         self.extra_edit.textChanged.connect(self._refresh_preview)
         self.record_name.textEdited.connect(self._on_name_edited)
         self.record_name.editingFinished.connect(self._refresh_preview)
+
+    def _build_toolbar(self) -> None:
+        toolbar = self.addToolBar("Toolbar")
+        toolbar.setMovable(False)
+        menu = QMenu(self)
+        self.auto_download_action = QAction("Auto-Download Spreadsheet Data", self, checkable=True)
+        self.auto_download_action.setToolTip("Download the spreadsheet data on startup, at most every 12 hours")
+        self.auto_download_action.toggled.connect(self._set_auto_download)
+        self.redownload_action = QAction("Re-download Spreadsheet Data Now", self)
+        self.redownload_action.triggered.connect(lambda: self.download_sheets(manual=True))
+        self.last_download_action = QAction("", self)
+        self.last_download_action.setEnabled(False)
+        menu.addAction(self.auto_download_action)
+        menu.addAction(self.redownload_action)
+        menu.addSeparator()
+        menu.addAction(self.last_download_action)
+        menu.setToolTipsVisible(True)
+        self.options_button = QToolButton()
+        self.options_button.setText("Options")
+        self.options_button.setMenu(menu)
+        self.options_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        toolbar.addWidget(self.options_button)
+
+    def _build_submission_tab(self) -> QWidget:
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+
+        layout.addWidget(QLabel("Spreadsheet ID, Doomworld URL, or idgames Path:"))
+        self.entry_edit = QLineEdit()
+        self.entry_edit.setPlaceholderText(ENTRY_PLACEHOLDER)
+        self.entry_edit.setToolTip(
+            "Identifies the idgames entry this submission is for:\n"
+            "- a spreadsheet ID (DOOM 2 WAD and Ports lists only), e.g. 12493\n"
+            "- a Doomworld URL, e.g. https://www.doomworld.com/idgames/levels/doom2/a-c/foo\n"
+            "- an idgames path, e.g. levels/doom2/Ports/a-c/foo")
+        self.entry_edit.textChanged.connect(self._run_lookup)
+        layout.addWidget(self.entry_edit)
+        self.entry_status = QLabel()
+        self.entry_status.setWordWrap(True)
+        self.entry_status.setTextFormat(Qt.TextFormat.RichText)
+        layout.addWidget(self.entry_status)
+
+        splitter = QSplitter(Qt.Orientation.Vertical)
+        splitter.setChildrenCollapsible(False)
+
+        hall = QGroupBox("Hall of Fame/Shame")
+        hall_layout = QVBoxLayout(hall)
+        checks = QHBoxLayout()
+        self.hof_check = QCheckBox("HoF")
+        self.hos_check = QCheckBox("HoS")
+        self.hof_check.toggled.connect(lambda on: on and self.hos_check.setChecked(False))
+        self.hos_check.toggled.connect(lambda on: on and self.hof_check.setChecked(False))
+        checks.addWidget(self.hof_check)
+        checks.addWidget(self.hos_check)
+        checks.addStretch()
+        hall_layout.addLayout(checks)
+        hall_layout.addWidget(QLabel("Why?"))
+        self.why_edit = QPlainTextEdit()
+        self.why_counter, self.why_warning = QLabel(), QLabel()
+        hall_layout.addWidget(self.why_edit, 1)
+        hall_layout.addLayout(self._counter_row(self.why_warning, self.why_counter))
+        splitter.addWidget(hall)
+
+        comments = QGroupBox("Comments")
+        comments_layout = QVBoxLayout(comments)
+        self.comments_edit = QPlainTextEdit()
+        self.comments_edit.setPlaceholderText(
+            "Put additional comments you want added to the video description here.")
+        self.comments_counter, self.comments_warning = QLabel(), QLabel()
+        comments_layout.addWidget(self.comments_edit, 1)
+        comments_layout.addLayout(self._counter_row(self.comments_warning, self.comments_counter))
+        splitter.addWidget(comments)
+        splitter.setStretchFactor(0, 1)
+        splitter.setStretchFactor(1, 2)
+        layout.addWidget(splitter, 1)
+
+        buttons = QHBoxLayout()
+        buttons.addWidget(QLabel("Text file:"))
+        self.txt_name_edit = QLineEdit()
+        self.txt_name_edit.setPlaceholderText("[zip file name].txt")
+        buttons.addWidget(self.txt_name_edit, 1)
+        self.create_txt_button = QPushButton("Create Text File")
+        self.create_txt_button.clicked.connect(self._create_text_file)
+        self.create_zip_button = QPushButton("Create Zip File…")
+        self.create_zip_button.clicked.connect(self._create_zip_file)
+        buttons.addWidget(self.create_txt_button)
+        buttons.addWidget(self.create_zip_button)
+        layout.addLayout(buttons)
+
+        for widget in (self.hof_check, self.hos_check):
+            widget.toggled.connect(self._update_submission_state)
+        for edit in (self.why_edit, self.comments_edit):
+            edit.textChanged.connect(self._update_submission_state)
+        return tab
+
+    @staticmethod
+    def _counter_row(warning: QLabel, counter: QLabel) -> QHBoxLayout:
+        warning.setWordWrap(True)
+        warning.setStyleSheet("color: #c0392b;")
+        warning.hide()
+        row = QHBoxLayout()
+        row.addWidget(warning, 1)
+        row.addWidget(counter, 0, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignTop)
+        return row
 
     @staticmethod
     def _with_buttons(widget, *buttons) -> QHBoxLayout:
@@ -325,6 +470,11 @@ class MainWindow(QMainWindow):
         self.demo_dir_edit.setText(s.demo_dir)
         self.sequence_check.setChecked(s.auto_sequence)
         self.keep_latest_check.setChecked(s.keep_latest_attempt)
+        self.auto_download_action.blockSignals(True)
+        self.auto_download_action.setChecked(bool(s.auto_download))
+        self.auto_download_action.blockSignals(False)
+        self._update_last_download_label()
+        self._update_submission_state()
         self.extra_edit.setText(s.last_extra_args)
         for p in s.ports:
             self.port_combo.addItem(self._port_label(p), p)
@@ -714,25 +864,148 @@ class MainWindow(QMainWindow):
         self._running_opts = None
         self.launch_button.setEnabled(True)
 
-    # --------------------------------------------------------------- package
-    def _package_existing_demos(self) -> None:
+    # ------------------------------------------------------- spreadsheet data
+    def startup(self) -> None:
+        """Run once the window is shown: first-launch question, then auto-download."""
+        if self.settings.auto_download is None:
+            answer = QMessageBox.question(self, "Auto-Download Spreadsheet Data", AUTO_DOWNLOAD_PROMPT)
+            enabled = answer == QMessageBox.StandardButton.Yes
+            self.auto_download_action.blockSignals(True)
+            self.auto_download_action.setChecked(enabled)
+            self.auto_download_action.blockSignals(False)
+            self._set_auto_download(enabled)
+        elif self.settings.auto_download:
+            self._download_if_due()
+
+    def _set_auto_download(self, enabled: bool) -> None:
+        self.settings.auto_download = enabled
+        self._save_state()
+        if enabled:
+            self._download_if_due()
+
+    def _download_if_due(self) -> None:
+        if download_due(self.settings.sheets_downloaded_at, self._sheet_dir):
+            self.download_sheets()
+
+    def download_sheets(self, manual: bool = False) -> None:
+        if self._downloader.running:
+            return
+        self._manual_download = manual
+        self.redownload_action.setEnabled(False)
+        self.statusBar().showMessage("Downloading spreadsheet data…")
+        self._downloader.start()
+
+    def _on_sheets_downloaded(self, texts: dict, errors: list) -> None:
+        self.redownload_action.setEnabled(True)
+        if texts:
+            try:
+                save_sheets(texts, self._sheet_dir)
+            except OSError as exc:
+                errors = [*errors, f"Could not save spreadsheet data: {exc}"]
+        if not errors:
+            self.settings.sheets_downloaded_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+            self._save_state()
+            self.statusBar().showMessage("Spreadsheet data updated.", 8000)
+            self._log("Spreadsheet data downloaded.")
+        else:
+            msg = "Spreadsheet download failed:\n" + "\n".join(errors)
+            self.statusBar().showMessage("Spreadsheet download failed (see log).", 8000)
+            self._log(msg)
+            if self._manual_download:
+                QMessageBox.warning(self, "Download failed", msg)
+        self._sheet_data = load_sheets(self._sheet_dir)
+        self._update_last_download_label()
+        self._run_lookup()
+
+    def _update_last_download_label(self) -> None:
+        last = parse_timestamp(self.settings.sheets_downloaded_at)
+        text = f"Last downloaded: {last.astimezone():%Y-%m-%d %H:%M}" if last else "Not downloaded yet"
+        self.last_download_action.setText(text)
+
+    # ------------------------------------------------------------ submission
+    def _run_lookup(self) -> None:
+        self._lookup = result = lookup(self.entry_edit.text(), self._sheet_data)
+        lines = []
+        if result.entry:
+            lines.append(f'<span style="color:#2e7d32;">Matched: {html.escape(result.entry.describe())}</span>')
+        # Follow the match, unless the user has typed their own file name.
+        auto_name = f"{result.entry.zip_name}.txt" if result.entry else ""
+        if self.txt_name_edit.text() == self._auto_txt_name:
+            self.txt_name_edit.setText(auto_name)
+        self._auto_txt_name = auto_name
+        for w in result.warnings:
+            lines.append(f'<span style="color:#b36b00;">Warning: {html.escape(w)}</span>')
+        if result.message:
+            color = "#c0392b" if result.blocked else "#b36b00"
+            lines.append(f'<span style="color:{color};">{html.escape(result.message)}</span>')
+        self.entry_status.setText("<br>".join(lines))
+        self.entry_status.setVisible(bool(lines))
+        self._update_submission_state()
+
+    def _hall(self) -> str | None:
+        return "HoF" if self.hof_check.isChecked() else "HoS" if self.hos_check.isChecked() else None
+
+    def _update_submission_state(self) -> None:
+        why, comments = self.why_edit.toPlainText(), self.comments_edit.toPlainText()
+        total = len(why) + len(comments)
+        for text, counter, warning in ((why, self.why_counter, self.why_warning),
+                                       (comments, self.comments_counter, self.comments_warning)):
+            counter.setText(f"{total}/{COMMENT_LIMIT}")
+            counter.setStyleSheet("color: #c0392b; font-weight: bold;" if total > COMMENT_LIMIT else "")
+            warnings = text_warnings(text, total)
+            warning.setText("\n".join(warnings))
+            warning.setVisible(bool(warnings))
+
+        reasons = []
+        if self._hall() and not why.strip():
+            reasons.append(f'{self._hall()} is checked: explain why in the "Why?" box.')
+        if self._lookup.blocked:
+            reasons.append(self._lookup.message)
+        for button, default in ((self.create_zip_button, ZIP_TOOLTIP), (self.create_txt_button, TXT_TOOLTIP)):
+            button.setEnabled(not reasons)
+            button.setToolTip("\n".join(reasons) if reasons else default)
+
+    def _submission_text(self) -> str:
+        return submission_text(self._hall(), self.why_edit.toPlainText(),
+                               self.comments_edit.toPlainText())
+
+    def _txt_name(self, fallback: str) -> str:
+        return ensure_suffix(self.txt_name_edit.text().strip() or fallback, ".txt")
+
+    def _create_text_file(self) -> None:
+        name = self._txt_name("comments")
+        target = Path(self.demo_dir_edit.text()) / name
+        if target.exists() and QMessageBox.question(
+                self, "Overwrite?", f"{name} already exists. Overwrite it?") != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(self._submission_text(), encoding="utf-8")
+        except OSError as exc:
+            QMessageBox.warning(self, "Could not write file", str(exc))
+            return
+        self._log(f"Wrote {target}")
+
+    def _create_zip_file(self) -> None:
         paths, _ = QFileDialog.getOpenFileNames(
-            self, "Choose demo(s) to package", self.demo_dir_edit.text(), DEMO_FILTER)
+            self, "Choose demo(s) for this submission", self.demo_dir_edit.text(), DEMO_FILTER)
         if not paths:
             return
         demos = [Path(p) for p in paths]
-        default = demos[0].parent / f"{default_package_name(demos)}.zip"
+        entry = self._lookup.entry
+        base = entry.zip_name if entry else default_package_name(demos)
         out, _ = QFileDialog.getSaveFileName(
-            self, "Save demo package", str(default), "Zip archive (*.zip)")
+            self, "Save submission zip", str(Path(self.demo_dir_edit.text()) / f"{base}.zip"),
+            "Zip archive (*.zip)")
         if not out:
             return
-        notes, ok = QInputDialog.getMultiLineText(self, "Demo notes", "Notes (optional):")
+        txt_name = self._txt_name(base)
         try:
-            result = package_demos(demos, self._current_options(), out, notes if ok else "")
+            result = create_submission_zip(demos, txt_name, self._submission_text(), out)
         except (OSError, ValueError) as exc:
-            QMessageBox.warning(self, "Packaging failed", str(exc))
+            QMessageBox.warning(self, "Could not create zip", str(exc))
             return
-        self._log(f"Packaged {len(demos)} demo(s): {result}")
+        self._log(f"Created {result} ({len(demos)} demo(s) + {txt_name})")
 
     # ------------------------------------------------------------------ misc
     def _log(self, text: str) -> None:

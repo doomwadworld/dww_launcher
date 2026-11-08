@@ -1,17 +1,10 @@
-import json
 import os
-import zipfile
 
-import pytest
-
-from dww_launcher.command import LaunchOptions
 from dww_launcher.demo import (
     auto_demo_name,
     consolidate_attempts,
     default_package_name,
-    file_sha256,
     next_sequence_number,
-    package_demos,
     recorded_files,
 )
 
@@ -103,40 +96,6 @@ def test_recorded_files(tmp_path):
 
 
 # --------------------------------------------------------------- packaging
-
-
-def test_package_multiple_demos(tmp_path, wad_factory):
-    iwad = wad_factory("doom2.wad", "IWAD", ["MAP01"])
-    pwad = wad_factory("zzsketch.wad", "PWAD", ["MAP01", "MAP02"])
-    demos = [touch(tmp_path / f"zzsketch_{i}.lmp", f"demo{i}".encode()) for i in (1, 2, 3)]
-    opts = LaunchOptions(port="/ports/dsda-doom", iwad=str(iwad), pwads=[str(pwad)],
-                         skill=4, complevel=2, fast=True, dsdademo=True)
-
-    out = package_demos(demos, opts, tmp_path / "out" / "zzsketch.zip", notes="UV-Fast")
-
-    with zipfile.ZipFile(out) as zf:
-        assert sorted(zf.namelist()) == ["manifest.json", "zzsketch_1.lmp", "zzsketch_2.lmp",
-                                         "zzsketch_3.lmp"]
-        assert zf.read("zzsketch_2.lmp") == b"demo2"
-        manifest = json.loads(zf.read("manifest.json"))
-    assert manifest["source_port"] == "dsda-doom"
-    assert manifest["iwad"]["sha256"] == file_sha256(iwad)
-    assert [d["name"] for d in manifest["demos"]] == ["zzsketch_1.lmp", "zzsketch_2.lmp", "zzsketch_3.lmp"]
-    assert manifest["flags"] == ["fast", "dsdademo"]
-    assert manifest["notes"] == "UV-Fast"
-
-
-def test_package_rejects_duplicate_names(tmp_path):
-    (tmp_path / "a").mkdir()
-    (tmp_path / "b").mkdir()
-    demos = [touch(tmp_path / "a" / "x.lmp"), touch(tmp_path / "b" / "x.lmp")]
-    with pytest.raises(ValueError):
-        package_demos(demos, LaunchOptions(), tmp_path / "x.zip")
-
-
-def test_package_missing_demo(tmp_path):
-    with pytest.raises(FileNotFoundError):
-        package_demos([tmp_path / "nope.lmp"], LaunchOptions(), tmp_path / "x.zip")
 
 
 def test_default_package_name(tmp_path):

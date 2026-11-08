@@ -28,9 +28,35 @@ playing back and packaging demos.
 - **Delete unsuccessful attempts:** after the game exits, keep only the newest
   `<name>-NNNNN.lmp` attempt file and rename it to `<name>.lmp`.
 - **Demo playback** with `-playdemo` or `-timedemo`, plus optional `-skipsec <seconds>`.
-- **Demo packaging:** zip one or more `.lmp` files with a `manifest.json` that records the port,
-  IWAD, PWADs (with SHA-256 hashes), skill, complevel and flags. *The final format is still to be decided.*
 - Source port output is shown in the launcher. Settings are saved between sessions.
+
+### Demo Submission tab
+
+- **Entry lookup:** enter a spreadsheet ID (DOOM 2 lists only), a Doomworld URL or an idgames path.
+  The launcher finds the matching row in the DWW spreadsheet:
+  - Paths containing `Ports` are looked up in the Ports lists, paths containing `Themes` in the
+    DOOM 2 Ports list, and everything else in the WAD lists. `doom` or `doom2` in the path picks the game.
+  - Deathmatch paths (`levels/doom/deathmatch/`, `levels/doom2/deathmatch/`) can't be submitted.
+  - Warnings for entries that have already been played and for paths with no match.
+  - DOOM 1 entries are matched on their full Doomworld link. DOOM 2 entries are matched on the zip
+    name, because the DOOM 2 tabs have no URLs in their CSV export. If a zip name matches more than
+    one entry, you're asked for the spreadsheet ID instead.
+- **Hall of Fame/Shame:** HoF / HoS checkboxes (mutually exclusive) and a "Why?" box. Required if
+  either box is checked.
+- **Comments** box. Both boxes share one `[characters]/4500` counter and warn about YouTube's
+  5000-character description limit and its ban on angle brackets.
+- **Create Text File** writes `[zip file name].txt` to the demo folder:
+  line 1 is `HoF`, `HoS` or `N/A`, followed by the "Why?" text (if any), then the comments.
+- **Create Zip File…** zips the chosen demos together with that text file as `[zip file name].zip`.
+
+### Spreadsheet data
+
+- The four DWW spreadsheet tabs (DOOM 1/2 WAD and Ports lists) are downloaded as CSV from Google
+  Sheets' "Publish to web" links. No account or API key is needed.
+- Files are cached in a `sheets` folder inside the config directory, so lookups also work offline.
+- **Options → Auto-Download Spreadsheet Data:** download on startup, at most once every 12 hours.
+  You're asked about this on first launch.
+- **Options → Re-download Spreadsheet Data Now** for a manual refresh.
 
 ## Running from source
 
@@ -49,7 +75,7 @@ python -m dww_launcher           # or: dww-launcher
 pytest
 ```
 
-The GUI test runs headless (`QT_QPA_PLATFORM=offscreen`) and uses a fake source port.
+The GUI tests run headless (`QT_QPA_PLATFORM=offscreen`) and use a fake source port and a local HTTP server.
 
 ## Project layout
 
@@ -58,7 +84,10 @@ src/dww_launcher/
   app.py              entry point
   wad.py              WAD reader: IWAD/PWAD, lump list, maps, game detection
   command.py          LaunchOptions -> source port command line
-  demo.py             demo packaging (zip + manifest.json)
+  demo.py             demo naming, sequence numbers, attempt cleanup
+  sheets.py           spreadsheet tab definitions, CSV cache, 12-hour refresh check
+  sheet_download.py   background CSV download (Qt networking)
+  submission.py       spreadsheet lookup, comment checks, submission text/zip
   config.py           persistent settings (JSON in the OS config dir)
   ui/main_window.py   the main window
 tests/
