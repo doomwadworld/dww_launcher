@@ -106,7 +106,8 @@ TXT_TOOLTIP = "Write the text file to the demo folder"
 YOUTUBE_URL = "https://www.youtube.com/@DOOMWADWorld"
 DISCORD_URL = "https://discord.com/invite/aUsWnqaePy"
 GITHUB_URL = "https://github.com/doomwadworld/dww_launcher"
-BROWSER_WIDTH = 640  # width the window grows by when the file browser opens
+BROWSER_WIDTH = 640  # default width of the file browser panel (then remembered)
+MIN_BROWSER_WIDTH = 320
 ENTRY_PLACEHOLDER = "e.g. 12493, https://www.doomworld.com/idgames/levels/doom2/a-c/zzsketch, levels/doom/Ports/a-c/foo"
 
 
@@ -552,6 +553,8 @@ class MainWindow(QMainWindow):
         self._select_data(self.iwad_combo, s.last_iwad)
         self.iwad_combo.blockSignals(False)
         self.pwad_list.add_paths(s.last_pwads)
+        self.file_browser.restore_state(s.file_browser_state)
+        self.file_browser.set_layers(s.map_layers)
         if s.file_browser_visible:
             self.browser_action.setChecked(True)
 
@@ -571,6 +574,9 @@ class MainWindow(QMainWindow):
         s.file_browser_dir = self.file_browser.directory or s.file_browser_dir
         s.file_browser_visible = self.browser_dock.isVisibleTo(self) if self.isVisible() \
             else self.browser_action.isChecked()
+        self._remember_browser_width()
+        s.file_browser_state = self.file_browser.save_state()
+        s.map_layers = self.file_browser.layers()
         try:
             s.save()
         except OSError as exc:
@@ -579,6 +585,7 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event):
         self._save_state()
         self.file_browser.stop()
+        self.file_browser.close_map_window()
         super().closeEvent(event)
 
     @staticmethod
@@ -1293,23 +1300,25 @@ class MainWindow(QMainWindow):
                 start = self.settings.file_browser_dir or self.demo_dir_edit.text()
                 if not self.file_browser.set_directory(start):
                     self.file_browser.set_directory(Path.home())
+            panel = max(int(self.settings.file_browser_width or BROWSER_WIDTH), MIN_BROWSER_WIDTH)
             self._width_before_browser = self.width() if resize else None
             self._width_with_browser = None
             if resize:
                 screen = self.screen().availableGeometry()
                 frame = self.frameGeometry().width() - self.width()
-                width = max(self.width(), min(self.width() + BROWSER_WIDTH, screen.width() - frame))
+                width = max(self.width(), min(self.width() + panel, screen.width() - frame))
                 x = max(screen.left(), min(self.x(), screen.right() + 1 - width - frame))
                 self.resize(width, self.height())
                 if x != self.x():
                     self.move(x, self.y())
             self.browser_dock.show()
-            self.resizeDocks([self.browser_dock], [BROWSER_WIDTH], Qt.Orientation.Horizontal)
+            self.resizeDocks([self.browser_dock], [panel], Qt.Orientation.Horizontal)
             # Qt may widen the window further to fit the dock; note the final width once laid out.
             QTimer.singleShot(0, self._note_browser_width)
         else:
             before = getattr(self, "_width_before_browser", None)
             after = getattr(self, "_width_with_browser", None) or self.width()
+            self._remember_browser_width()
             self.browser_dock.hide()
             if resize and before is not None:
                 # Back to the original width, keeping any resizing the user did meanwhile. Deferred
@@ -1318,6 +1327,11 @@ class MainWindow(QMainWindow):
                 QTimer.singleShot(0, lambda: self.resize(max(target, self.minimumSizeHint().width()),
                                                          self.height()))
             self._width_before_browser = None
+
+    def _remember_browser_width(self) -> None:
+        """Store the panel's current width so it reopens at the same size."""
+        if self.browser_dock.isVisible() and self.browser_dock.width() >= MIN_BROWSER_WIDTH:
+            self.settings.file_browser_width = self.browser_dock.width()
 
     def _note_browser_width(self) -> None:
         if self.browser_dock.isVisible():

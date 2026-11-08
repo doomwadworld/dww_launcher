@@ -45,6 +45,8 @@ class Line:
     v2: int
     special: int
     two_sided: bool
+    front: int = -1  # sidedef indices (-1 = none)
+    back: int = -1
 
 
 @dataclass
@@ -64,12 +66,53 @@ class MapData:
     lines: list[Line] = field(default_factory=list)
     things: list[Thing] = field(default_factory=list)
     sector_specials: list[int] = field(default_factory=list)
-    secret_sectors: int = 0
+    sector_secret: list[bool] = field(default_factory=list)  # per sector
+    side_sectors: list[int] = field(default_factory=list)  # sector of each sidedef
     sidedefs: int = 0
+
+    @property
+    def secret_sectors(self) -> int:
+        return sum(self.sector_secret)
 
     def exit_kind(self, line: Line) -> str | None:
         table = DOOM_EXITS if self.format == "Doom" else HEXEN_EXITS
         return table.get(line.special)
+
+    def _side_sector(self, side: int) -> int:
+        return self.side_sectors[side] if 0 <= side < len(self.side_sectors) else -1
+
+    def sector_outlines(self, sector: int) -> list[list[int]]:
+        """Closed vertex loops bounding ``sector`` (for filling it in a preview).
+
+        Lines whose front or back side belongs to the sector are chained end to end; holes
+        come out as separate loops, so an odd-even fill draws them correctly.
+        """
+        edges = [(ln.v1, ln.v2) for ln in self.lines
+                 if self._side_sector(ln.front) == sector or self._side_sector(ln.back) == sector]
+        edges = [e for e in edges if e[0] != e[1]]
+        by_vertex: dict[int, list[int]] = {}
+        for i, (a, b) in enumerate(edges):
+            by_vertex.setdefault(a, []).append(i)
+            by_vertex.setdefault(b, []).append(i)
+        used = [False] * len(edges)
+        loops = []
+        for start in range(len(edges)):
+            if used[start]:
+                continue
+            used[start] = True
+            first, current = edges[start]
+            loop = [first, current]
+            while current != first:
+                nxt = next((i for i in by_vertex.get(current, ()) if not used[i]), None)
+                if nxt is None:
+                    break  # open chain (damaged map): still usable as an outline
+                used[nxt] = True
+                a, b = edges[nxt]
+                current = b if a == current else a
+                loop.append(current)
+            if len(loop) >= 3:
+                loops.append(loop)
+        return loops
 
 
 # ------------------------------------------------------------------ finding maps
@@ -119,12 +162,15 @@ def _parse_binary(name: str, data: dict[str, bytes], hexen: bool) -> MapData:
     m.vertices = [(x, y) for x, y in struct.iter_unpack("<hh", v[:len(v) // 4 * 4])]
 
     ld = data.get("LINEDEFS", b"")
+    def side(i: int) -> int:
+        return -1 if i == 0xFFFF else i
+
     if hexen:  # v1, v2, flags, special(byte), 5 args, front, back
-        for v1, v2, _f, special, *_args, _front, back in struct.iter_unpack("<HHHB5BHH", ld[:len(ld) // 16 * 16]):
-            m.lines.append(Line(v1, v2, special, back != 0xFFFF))
+        for v1, v2, _f, special, *_args, front, back in struct.iter_unpack("<HHHB5BHH", ld[:len(ld) // 16 * 16]):
+            m.lines.append(Line(v1, v2, special, back != 0xFFFF, side(front), side(back)))
     else:  # v1, v2, flags, special, tag, front, back
-        for v1, v2, _f, special, _tag, _front, back in struct.iter_unpack("<HHHHHHH", ld[:len(ld) // 14 * 14]):
-            m.lines.append(Line(v1, v2, special, back != 0xFFFF))
+        for v1, v2, _f, special, _tag, front, back in struct.iter_unpack("<HHHHHHH", ld[:len(ld) // 14 * 14]):
+            m.lines.append(Line(v1, v2, special, back != 0xFFFF, side(front), side(back)))
 
     th = data.get("THINGS", b"")
     if hexen:  # tid, x, y, z, angle, type, flags, special, 5 args
@@ -138,10 +184,13 @@ def _parse_binary(name: str, data: dict[str, bytes], hexen: bool) -> MapData:
     for _fl, _ce, _ft, _ct, _light, special, _tag in struct.iter_unpack("<hh8s8shhh", sec[:len(sec) // 26 * 26]):
         m.sector_specials.append(special)
     if hexen:  # ZDoom "Doom in Hexen" format: secret flag bit
-        m.secret_sectors = sum(1 for s in m.sector_specials if s & 1024)
+        m.sector_secret = [bool(s & 1024) for s in m.sector_specials]
     else:  # vanilla type 9, or the Boom generalised secret bit
-        m.secret_sectors = sum(1 for s in m.sector_specials if s == 9 or s & 128)
-    m.sidedefs = len(data.get("SIDEDEFS", b"")) // 30
+        m.sector_secret = [s == 9 or bool(s & 128) for s in m.sector_specials]
+    sd = data.get("SIDEDEFS", b"")
+    # x offset, y offset, upper, lower and middle textures, sector
+    m.side_sectors = [sector for *_rest, sector in struct.iter_unpack("<hh8s8s8sH", sd[:len(sd) // 30 * 30])]
+    m.sidedefs = len(m.side_sectors)
     return m
 
 
@@ -172,16 +221,16 @@ def _parse_udmf(name: str, text: bytes) -> MapData:
         if kind == "vertex":
             m.vertices.append((float(f.get("x", 0)), float(f.get("y", 0))))
         elif kind == "linedef":
-            back = f.get("sideback", -1)
+            front, back = int(f.get("sidefront", -1)), int(f.get("sideback", -1))
             m.lines.append(Line(int(f.get("v1", 0)), int(f.get("v2", 0)), int(f.get("special", 0)),
-                                back not in (-1, None)))
+                                back != -1, front, back))
         elif kind == "sidedef":
             m.sidedefs += 1
+            m.side_sectors.append(int(f.get("sector", -1)))
         elif kind == "sector":
             special = int(f.get("special", 0))
             m.sector_specials.append(special)
-            if f.get("secret") is True or special & 1024 or special == 9 or special == 195:
-                m.secret_sectors += 1
+            m.sector_secret.append(f.get("secret") is True or bool(special & 1024) or special in (9, 195))
         elif kind == "thing":
             m.things.append(Thing(int(f.get("type", 0)), float(f.get("x", 0)), float(f.get("y", 0)),
                                   uv=bool(f.get("skill4")), single=bool(f.get("single"))))

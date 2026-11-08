@@ -34,6 +34,9 @@ class Settings:
     txt_dir_same_as_demo: bool = True
     file_browser_dir: str = ""
     file_browser_visible: bool = False
+    file_browser_width: int = 640  # panel width in pixels
+    file_browser_state: dict = field(default_factory=dict)  # splitter positions, column widths
+    map_layers: dict = field(default_factory=dict)  # map preview toggles: things/keys/weapons/secrets
     auto_download: bool | None = None  # None = never asked
     sheets_downloaded_at: str = ""  # ISO timestamp (UTC) of the last successful download
 
