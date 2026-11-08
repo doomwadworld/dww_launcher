@@ -1,8 +1,12 @@
 # DWW Launcher
 
-**Doom WAD World Launcher** is a cross-platform (Windows, macOS, Linux) GUI for launching
+**DOOM WAD World Launcher** is a cross-platform (Windows, macOS, Linux) GUI for launching
 classic Doom engine games with any source port, IWAD and set of mods, and for recording,
-playing back and packaging demos.
+playing back and packaging demos in a format ready for submission to our YouTube channel. It is primarily intended for use by contributors to the channel, but it can also be used as a general purpose classic DOOM launcher.
+
+Join our Discord server for more information on contributing to the video archive: https://discord.com/invite/aUsWnqaePy
+
+Youtube: https://www.youtube.com/@DOOMWADWorld/
 
 ## AI Code Disclaimer
 
