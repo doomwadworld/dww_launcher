@@ -467,3 +467,12 @@ def test_txt_name_follows_match_unless_edited(qapp, sheet_window):
     w.txt_name_edit.setText("custom.txt")
     w.entry_edit.setText("12493")
     assert w.txt_name_edit.text() == "custom.txt"
+
+
+def test_app_icon(qapp):
+    from dww_launcher.icons import app_icon
+
+    icon = app_icon()
+    assert not icon.isNull()
+    sizes = {s.width() for s in icon.availableSizes()}
+    assert {16, 32, 256} <= sizes

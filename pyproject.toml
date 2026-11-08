@@ -14,13 +14,16 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8"]
+dev = ["pytest>=8", "pillow>=10"]  # pillow: scripts/make_icons.py
 
 [project.gui-scripts]
 dww-launcher = "dww_launcher.app:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+dww_launcher = ["resources/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
