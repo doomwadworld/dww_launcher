@@ -6,17 +6,20 @@ import html
 from datetime import datetime, timezone
 from pathlib import Path
 
-from PySide6.QtCore import QProcess, QRegularExpression, Qt, QUrl, Signal
-from PySide6.QtGui import QAction, QDesktopServices, QFontDatabase, QRegularExpressionValidator
+from PySide6.QtCore import QProcess, QRegularExpression, Qt, Signal
+from PySide6.QtGui import QAction, QFontDatabase, QRegularExpressionValidator
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
     QCheckBox,
     QComboBox,
+    QDialog,
+    QDialogButtonBox,
     QFileDialog,
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QListWidget,
@@ -41,13 +44,24 @@ from dww_launcher.command import (
     format_command,
     resolve_executable,
 )
+from dww_launcher import __version__
 from dww_launcher.config import Settings
+from dww_launcher.desktop import open_folder, open_url, process_environment
 from dww_launcher.demo import (
     auto_demo_name,
     consolidate_attempts,
     default_package_name,
     recorded_files,
     strip_lmp,
+)
+from dww_launcher.profiles import (
+    Profile,
+    delete_profile,
+    list_profiles,
+    load_profile,
+    profile_exists,
+    profiles_dir,
+    save_profile,
 )
 from dww_launcher.sheet_download import SheetDownloader
 from dww_launcher.sheets import download_due, load_sheets, parse_timestamp, save_sheets, sheets_dir
@@ -56,6 +70,7 @@ from dww_launcher.submission import (
     Lookup,
     create_submission_zip,
     ensure_suffix,
+    identifier_line,
     lookup,
     submission_text,
     text_warnings,
@@ -85,6 +100,9 @@ AUTO_DOWNLOAD_PROMPT = (
 )
 ZIP_TOOLTIP = "Choose demos and zip them together with the text file"
 TXT_TOOLTIP = "Write the text file to the demo folder"
+YOUTUBE_URL = "https://www.youtube.com/@DOOMWADWorld"
+DISCORD_URL = "https://discord.com/invite/aUsWnqaePy"
+GITHUB_URL = "https://github.com/doomwadworld/dww_launcher"
 ENTRY_PLACEHOLDER = "e.g. 12493, https://www.doomworld.com/idgames/levels/doom2/a-c/zzsketch, levels/doom/Ports/a-c/foo"
 
 
@@ -140,10 +158,12 @@ class PwadList(QListWidget):
 
 class MainWindow(QMainWindow):
     def __init__(self, settings: Settings | None = None, sheet_dir: Path | None = None,
-                 sheet_urls: dict[str, str] | None = None):
+                 sheet_urls: dict[str, str] | None = None, profile_dir: Path | None = None):
         super().__init__()
         self.settings = settings if settings is not None else Settings.load()
         self._sheet_dir = sheet_dir or sheets_dir()
+        self._profile_dir = profile_dir or profiles_dir()
+        self.current_profile: str | None = None
         self._sheet_data = load_sheets(self._sheet_dir)
         self._lookup = Lookup()
         self._auto_txt_name = ""
@@ -372,6 +392,19 @@ class MainWindow(QMainWindow):
         self.options_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         toolbar.addWidget(self.options_button)
 
+        self.profiles_menu = QMenu(self)
+        self.profiles_menu.aboutToShow.connect(self._rebuild_profiles_menu)
+        self.profiles_button = QToolButton()
+        self.profiles_button.setText("Profiles")
+        self.profiles_button.setMenu(self.profiles_menu)
+        self.profiles_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        toolbar.addWidget(self.profiles_button)
+
+        about = QToolButton()
+        about.setText("About")
+        about.clicked.connect(self.show_about)
+        toolbar.addWidget(about)
+
     def _build_submission_tab(self) -> QWidget:
         tab = QWidget()
         layout = QVBoxLayout(tab)
@@ -425,6 +458,23 @@ class MainWindow(QMainWindow):
         splitter.setStretchFactor(1, 2)
         layout.addWidget(splitter, 1)
 
+        folder_row = QHBoxLayout()
+        folder_row.addWidget(QLabel("Text file folder:"))
+        self.txt_dir_edit = QLineEdit()
+        self.txt_dir_edit.setReadOnly(True)
+        folder_row.addWidget(self.txt_dir_edit, 1)
+        self.txt_dir_change = QPushButton("Change…")
+        self.txt_dir_change.clicked.connect(self._choose_txt_dir)
+        folder_row.addWidget(self.txt_dir_change)
+        txt_dir_open = QPushButton("Open")
+        txt_dir_open.clicked.connect(lambda: self._open_folder(self.txt_dir_edit.text()))
+        folder_row.addWidget(txt_dir_open)
+        self.txt_same_check = QCheckBox("Same as demo folder")
+        self.txt_same_check.setToolTip("Always save the text file in the demo folder (Game tab)")
+        self.txt_same_check.toggled.connect(self._on_txt_same_toggled)
+        folder_row.addWidget(self.txt_same_check)
+        layout.addLayout(folder_row)
+
         buttons = QHBoxLayout()
         buttons.addWidget(QLabel("Text file:"))
         self.txt_name_edit = QLineEdit()
@@ -468,6 +518,9 @@ class MainWindow(QMainWindow):
     def _restore_state(self) -> None:
         s = self.settings
         self.demo_dir_edit.setText(s.demo_dir)
+        self._txt_dir_custom = s.txt_dir or s.demo_dir
+        self.txt_same_check.setChecked(s.txt_dir_same_as_demo)
+        self._on_txt_same_toggled(s.txt_dir_same_as_demo)
         self.sequence_check.setChecked(s.auto_sequence)
         self.keep_latest_check.setChecked(s.keep_latest_attempt)
         self.auto_download_action.blockSignals(True)
@@ -497,6 +550,8 @@ class MainWindow(QMainWindow):
         s.demo_dir = self.demo_dir_edit.text()
         s.auto_sequence = self.sequence_check.isChecked()
         s.keep_latest_attempt = self.keep_latest_check.isChecked()
+        s.txt_dir_same_as_demo = self.txt_same_check.isChecked()
+        s.txt_dir = self._txt_dir_custom
         try:
             s.save()
         except OSError as exc:
@@ -764,13 +819,39 @@ class MainWindow(QMainWindow):
     def _choose_demo_dir(self) -> None:
         path = QFileDialog.getExistingDirectory(self, "Demo folder", self.demo_dir_edit.text())
         if path:
-            self.demo_dir_edit.setText(path)
-            self._refresh_preview()
+            self._set_demo_dir(path)
             self._save_state()
 
+    def _set_demo_dir(self, path: str) -> None:
+        self.demo_dir_edit.setText(path)
+        if self.txt_same_check.isChecked():
+            self.txt_dir_edit.setText(path)
+        self._refresh_preview()
+
     def _open_demo_dir(self) -> None:
-        Path(self.demo_dir_edit.text()).mkdir(parents=True, exist_ok=True)
-        QDesktopServices.openUrl(QUrl.fromLocalFile(self.demo_dir_edit.text()))
+        self._open_folder(self.demo_dir_edit.text())
+
+    def _open_folder(self, path: str) -> None:
+        if not path:
+            return
+        try:
+            ok = open_folder(path)
+        except OSError as exc:
+            ok = False
+            self._log(f"Could not create {path}: {exc}")
+        if not ok:
+            self._log(f"Could not open {path} in the file manager.")
+
+    def _on_txt_same_toggled(self, same: bool) -> None:
+        self.txt_dir_change.setEnabled(not same)
+        self.txt_dir_edit.setText(self.demo_dir_edit.text() if same else self._txt_dir_custom)
+
+    def _choose_txt_dir(self) -> None:
+        path = QFileDialog.getExistingDirectory(self, "Text file folder", self.txt_dir_edit.text())
+        if path:
+            self._txt_dir_custom = path
+            self.txt_dir_edit.setText(path)
+            self._save_state()
 
     # ---------------------------------------------------------------- launch
     def _launch(self) -> None:
@@ -811,6 +892,8 @@ class MainWindow(QMainWindow):
         proc.setArguments(cmd[1:])
         # Many ports look for their config and resources next to the executable.
         proc.setWorkingDirectory(str(exe.parent))
+        # Don't pass the launcher's bundled-Qt library paths on to the source port.
+        proc.setProcessEnvironment(process_environment())
         proc.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
         proc.readyReadStandardOutput.connect(
             lambda: self._log(bytes(proc.readAllStandardOutput()).decode(errors="replace").rstrip()))
@@ -966,15 +1049,15 @@ class MainWindow(QMainWindow):
             button.setToolTip("\n".join(reasons) if reasons else default)
 
     def _submission_text(self) -> str:
-        return submission_text(self._hall(), self.why_edit.toPlainText(),
-                               self.comments_edit.toPlainText())
+        return submission_text(identifier_line(self.entry_edit.text(), self._lookup), self._hall(),
+                               self.why_edit.toPlainText(), self.comments_edit.toPlainText())
 
     def _txt_name(self, fallback: str) -> str:
         return ensure_suffix(self.txt_name_edit.text().strip() or fallback, ".txt")
 
     def _create_text_file(self) -> None:
         name = self._txt_name("comments")
-        target = Path(self.demo_dir_edit.text()) / name
+        target = Path(self.txt_dir_edit.text() or self.demo_dir_edit.text()) / name
         if target.exists() and QMessageBox.question(
                 self, "Overwrite?", f"{name} already exists. Overwrite it?") != QMessageBox.StandardButton.Yes:
             return
@@ -1007,7 +1090,179 @@ class MainWindow(QMainWindow):
             return
         self._log(f"Created {result} ({len(demos)} demo(s) + {txt_name})")
 
+    # -------------------------------------------------------------- profiles
+    def capture_profile(self) -> Profile:
+        return Profile(
+            port=self.port_combo.currentData() or "",
+            iwad=self.iwad_combo.currentData() or "",
+            pwads=self.pwad_list.paths(),
+            map=self.map_combo.currentData(),
+            skill=self.skill_combo.currentData(),
+            complevel=self.complevel_combo.currentData(),
+            fast=self.fast_check.isChecked(),
+            respawn=self.respawn_check.isChecked(),
+            nomonsters=self.nomonsters_check.isChecked(),
+            tas=self.tas_check.isChecked(),
+            dsdademo=self.dsdademo_check.isChecked(),
+            extra_args=self.extra_edit.text(),
+            record=self.record_check.isChecked(),
+            record_name=self.record_name.text().strip() if self._name_manual else None,
+            auto_sequence=self.sequence_check.isChecked(),
+            keep_latest_attempt=self.keep_latest_check.isChecked(),
+            demo_dir=self.demo_dir_edit.text(),
+            timedemo=self.timedemo_check.isChecked(),
+            skipsec=self.skipsec_edit.text(),
+            txt_dir=self._txt_dir_custom,
+            txt_dir_same_as_demo=self.txt_same_check.isChecked(),
+        )
+
+    def apply_profile(self, p: Profile) -> list[str]:
+        """Apply a profile; returns warnings about files that no longer exist."""
+        missing = [f for f in (p.port, p.iwad, *p.pwads) if f and not Path(f).exists()]
+        if p.port and self.port_combo.findData(p.port) < 0:
+            self.port_combo.addItem(self._port_label(p.port), p.port)
+        self._select_data(self.port_combo, p.port)
+        if p.iwad and self.iwad_combo.findData(p.iwad) < 0:
+            self.iwad_combo.addItem(Path(p.iwad).name, p.iwad)
+        self.iwad_combo.blockSignals(True)
+        if p.iwad:
+            self._select_data(self.iwad_combo, p.iwad)
+        self.iwad_combo.blockSignals(False)
+
+        self.demo_dir_edit.setText(p.demo_dir or self.demo_dir_edit.text())
+        self._txt_dir_custom = p.txt_dir or self.demo_dir_edit.text()
+        self.txt_same_check.setChecked(p.txt_dir_same_as_demo)
+        self._on_txt_same_toggled(p.txt_dir_same_as_demo)
+
+        self.pwad_list.clear()
+        self.pwad_list.add_paths(p.pwads)  # may auto-select a map / complevel; overridden below
+        self._refresh()
+        self._select_data(self.map_combo, p.map)
+        if p.map is None:
+            self.map_combo.setCurrentIndex(0)
+        self._select_data(self.skill_combo, p.skill)
+        self._select_data(self.complevel_combo, p.complevel)
+        for check, value in ((self.fast_check, p.fast), (self.respawn_check, p.respawn),
+                             (self.nomonsters_check, p.nomonsters), (self.tas_check, p.tas),
+                             (self.dsdademo_check, p.dsdademo), (self.record_check, p.record),
+                             (self.sequence_check, p.auto_sequence),
+                             (self.keep_latest_check, p.keep_latest_attempt),
+                             (self.timedemo_check, p.timedemo)):
+            check.setChecked(value)
+        self.extra_edit.setText(p.extra_args)
+        self.skipsec_edit.setText(p.skipsec)
+        self._name_manual = bool(p.record_name)
+        if p.record_name:
+            self.record_name.setText(p.record_name)
+        self._refresh_preview()
+        return missing
+
+    def _rebuild_profiles_menu(self) -> None:
+        menu = self.profiles_menu
+        menu.clear()
+        menu.addAction("Save Profile As…", self._save_profile_as)
+        if self.current_profile:
+            menu.addAction(f'Update "{self.current_profile}"',
+                           lambda: self._save_profile(self.current_profile))
+        names = list_profiles(self._profile_dir)
+        menu.addSeparator()
+        if names:
+            header = menu.addAction("Load profile:")
+            header.setEnabled(False)
+            for name in names:
+                action = menu.addAction(name, lambda n=name: self.load_profile_named(n))
+                action.setCheckable(True)
+                action.setChecked(name == self.current_profile)
+            delete_menu = menu.addMenu("Delete Profile")
+            for name in names:
+                delete_menu.addAction(name, lambda n=name: self._delete_profile(n))
+        else:
+            empty = menu.addAction("No saved profiles")
+            empty.setEnabled(False)
+        menu.addSeparator()
+        menu.addAction("Open Profiles Folder", lambda: self._open_folder(str(self._profile_dir)))
+
+    def _save_profile_as(self) -> None:
+        name, ok = QInputDialog.getText(self, "Save Profile", "Profile name:",
+                                        text=self.current_profile or "")
+        name = name.strip()
+        if not ok or not name:
+            return
+        if profile_exists(name, self._profile_dir) and QMessageBox.question(
+                self, "Replace profile?", f'A profile named "{name}" already exists. Replace it?'
+        ) != QMessageBox.StandardButton.Yes:
+            return
+        self._save_profile(name)
+
+    def _save_profile(self, name: str) -> None:
+        try:
+            save_profile(name, self.capture_profile(), self._profile_dir)
+        except OSError as exc:
+            QMessageBox.warning(self, "Could not save profile", str(exc))
+            return
+        self._set_current_profile(name)
+        self._log(f'Saved profile "{name}".')
+
+    def load_profile_named(self, name: str) -> None:
+        try:
+            profile = load_profile(name, self._profile_dir)
+        except (OSError, ValueError, TypeError) as exc:
+            QMessageBox.warning(self, "Could not load profile", f'"{name}": {exc}')
+            return
+        missing = self.apply_profile(profile)
+        self._set_current_profile(name)
+        self._save_state()
+        self._log(f'Loaded profile "{name}".')
+        if missing:
+            self._log("Warning: these files from the profile no longer exist:\n  " + "\n  ".join(missing))
+
+    def _delete_profile(self, name: str) -> None:
+        if QMessageBox.question(self, "Delete profile?", f'Delete the profile "{name}"?') \
+                != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            delete_profile(name, self._profile_dir)
+        except OSError as exc:
+            QMessageBox.warning(self, "Could not delete profile", str(exc))
+            return
+        if name == self.current_profile:
+            self._set_current_profile(None)
+        self._log(f'Deleted profile "{name}".')
+
+    def _set_current_profile(self, name: str | None) -> None:
+        self.current_profile = name
+        self.setWindowTitle("Doom WAD World Launcher" + (f" - {name}" if name else ""))
+
+    # ----------------------------------------------------------------- about
+    def show_about(self) -> None:
+        AboutDialog(self).exec()
+
     # ------------------------------------------------------------------ misc
     def _log(self, text: str) -> None:
         if text:
             self.log.appendPlainText(text)
+
+
+class AboutDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("About DWW Launcher")
+        layout = QVBoxLayout(self)
+        top = QHBoxLayout()
+        icon = QLabel()
+        icon.setPixmap(self.windowIcon().pixmap(64, 64))
+        top.addWidget(icon, 0, Qt.AlignmentFlag.AlignTop)
+        links = [("YouTube", YOUTUBE_URL), ("Discord", DISCORD_URL), ("GitHub", GITHUB_URL)]
+        self.text = QLabel(
+            f"<h3>Doom WAD World Launcher</h3><p>Version {html.escape(__version__)}</p>"
+            + "".join(f'<p>{label}: <a href="{url}">{html.escape(url)}</a></p>' for label, url in links)
+        )
+        self.text.setTextFormat(Qt.TextFormat.RichText)
+        self.text.setTextInteractionFlags(Qt.TextInteractionFlag.TextBrowserInteraction)
+        self.text.setOpenExternalLinks(False)  # open via desktop.open_url (clean environment)
+        self.text.linkActivated.connect(open_url)
+        top.addWidget(self.text, 1)
+        layout.addLayout(top)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok)
+        buttons.accepted.connect(self.accept)
+        layout.addWidget(buttons)

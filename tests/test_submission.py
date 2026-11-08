@@ -7,6 +7,7 @@ from dww_launcher.submission import (
     BRACKET_WARNING,
     OVER_LIMIT_WARNING,
     create_submission_zip,
+    identifier_line,
     idgames_path,
     lookup,
     submission_text,
@@ -154,10 +155,24 @@ def test_text_warnings():
 
 
 def test_submission_text():
-    assert submission_text("HoF", "Great maps", "Played on UV.\nNo saves.") == \
-        "HoF\nGreat maps\nPlayed on UV.\nNo saves.\n"
-    assert submission_text(None, "", "") == "N/A\n"
-    assert submission_text("HoS", "  ", "c") == "HoS\nc\n"
+    assert submission_text("12493", "HoF", "Great maps", "Played on UV.\nNo saves.") == \
+        "12493\nHoF\nGreat maps\nPlayed on UV.\nNo saves.\n"
+    assert submission_text("", None, "", "") == "N/A\nN/A\n"
+    assert submission_text("x", "HoS", "  ", "c") == "x\nHoS\nc\n"
+
+
+@pytest.mark.parametrize("text,expected", [
+    ("12493", "12493"),  # ID only: DOOM 2 rows have no URL
+    ("https://www.doomworld.com/idgames/levels/doom2/a-c/zzsketch", "12493 | levels/doom2/a-c/zzsketch"),
+    ("levels/doom2/Ports/0-9/10line.zip", "8599 | levels/doom2/Ports/0-9/10line"),
+    ("https://www.doomworld.com/idgames/levels/doom/0-9/1kill", "levels/doom/0-9/1kill"),  # DOOM 1: no IDs
+    ("levels/doom2/a-c/nothere", "levels/doom2/a-c/nothere"),  # no match: what was entered
+    ("99999", "99999"),
+    ("levels/doom2/Ports/a-c/artifact", "levels/doom2/Ports/a-c/artifact"),  # ambiguous: path only
+    ("", "N/A"),
+])
+def test_identifier_line(text, expected):
+    assert identifier_line(text, lookup(text, DATA)) == expected
 
 
 def test_create_submission_zip(tmp_path):

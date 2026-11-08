@@ -30,6 +30,8 @@ class Settings:
     last_extra_args: str = ""
     auto_sequence: bool = True
     keep_latest_attempt: bool = False
+    txt_dir: str = ""  # folder for the submission text file
+    txt_dir_same_as_demo: bool = True
     auto_download: bool | None = None  # None = never asked
     sheets_downloaded_at: str = ""  # ISO timestamp (UTC) of the last successful download
 
