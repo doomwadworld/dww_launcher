@@ -1,24 +1,10 @@
-"""Demo naming, attempt cleanup and packaging.
-
-Package format (prototype, to be refined): a .zip containing one or more demo
-lumps and a ``manifest.json`` describing how they were recorded, so someone
-else can reproduce the playback setup.
-"""
+"""Demo naming and attempt cleanup."""
 
 from __future__ import annotations
 
-import hashlib
-import json
 import re
-import zipfile
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
 from pathlib import Path
-
-from dww_launcher import __version__
-from dww_launcher.command import LaunchOptions, resolve_executable
-
-MANIFEST_VERSION = 2
 
 # ------------------------------------------------------------------ naming
 
@@ -124,63 +110,7 @@ def recorded_files(demo_dir: str | Path, name: str) -> list[Path]:
 # --------------------------------------------------------------- packaging
 
 
-def file_sha256(path: str | Path) -> str:
-    h = hashlib.sha256()
-    with Path(path).open("rb") as f:
-        for chunk in iter(lambda: f.read(1 << 20), b""):
-            h.update(chunk)
-    return h.hexdigest()
-
-
-def _file_entry(path: str | Path) -> dict:
-    p = Path(path)
-    entry = {"name": p.name}
-    if p.is_file():
-        entry["size"] = p.stat().st_size
-        entry["sha256"] = file_sha256(p)
-    return entry
-
-
-def build_manifest(demo_paths: list[Path], opts: LaunchOptions, notes: str = "") -> dict:
-    return {
-        "format": "dww-demo",
-        "manifest_version": MANIFEST_VERSION,
-        "created": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        "launcher_version": __version__,
-        "demos": [_file_entry(p) for p in demo_paths],
-        "source_port": resolve_executable(opts.port).name if opts.port else None,
-        "iwad": _file_entry(opts.iwad) if opts.iwad else None,
-        "pwads": [_file_entry(p) for p in opts.pwads],
-        "skill": opts.skill,
-        "complevel": opts.complevel,
-        "flags": [f for f in ("fast", "respawn", "nomonsters", "tas", "dsdademo") if getattr(opts, f)],
-        "extra_args": opts.extra_args,
-        "notes": notes,
-    }
-
-
 def default_package_name(demo_paths: list[Path]) -> str:
     """``zzsketch`` for zzsketch_1.lmp + zzsketch_2.lmp; otherwise the first demo's name."""
     stems = [re.sub(r"_\d+$", "", Path(p).stem) for p in demo_paths]
     return stems[0] if len(set(stems)) == 1 else Path(demo_paths[0]).stem
-
-
-def package_demos(
-    demo_paths: list[str | Path], opts: LaunchOptions, out_path: str | Path, notes: str = ""
-) -> Path:
-    paths = [Path(p) for p in demo_paths]
-    if not paths:
-        raise ValueError("No demos to package")
-    for p in paths:
-        if not p.is_file():
-            raise FileNotFoundError(p)
-    names = [p.name.lower() for p in paths]
-    if len(set(names)) != len(names):
-        raise ValueError("Two of the selected demos have the same file name")
-    out_path = Path(out_path)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    with zipfile.ZipFile(out_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-        for p in paths:
-            zf.write(p, p.name)
-        zf.writestr("manifest.json", json.dumps(build_manifest(paths, opts, notes), indent=2))
-    return out_path

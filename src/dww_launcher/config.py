@@ -30,6 +30,8 @@ class Settings:
     last_extra_args: str = ""
     auto_sequence: bool = True
     keep_latest_attempt: bool = False
+    auto_download: bool | None = None  # None = never asked
+    sheets_downloaded_at: str = ""  # ISO timestamp (UTC) of the last successful download
 
     @classmethod
     def load(cls, path: Path | None = None) -> "Settings":
