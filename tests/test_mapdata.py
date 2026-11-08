@@ -135,3 +135,35 @@ def test_udmf_side_sectors():
     m = load_map(WadFile(build_wad("PWAD", lumps)), "MAP07")
     assert m.side_sectors == [0, 0, 0] and m.sector_secret == [True, False]
     assert m.lines[0].front == 0 and m.lines[1].back == 2
+
+
+def test_thing_descriptions():
+    m = load_map(WadFile(build_wad("PWAD", doom_map_lumps())), "MAP01")
+    by_type = {}
+    for t in m.things:
+        by_type.setdefault(t.type, []).append(t)
+    imp_uv, imp_hard, imp_easy, imp_mp = by_type[3001]
+    assert imp_uv.name == "Imp" and imp_uv.category == "Monster"
+    assert imp_uv.describe().splitlines() == ["Imp", "Monster · type 3001", "All skills", "At (64, 64), facing east"]
+    assert "Skills: hard" in imp_hard.describe()
+    assert "Skills: easy" in imp_easy.describe()
+    assert "multiplayer only" in imp_mp.describe()
+    assert by_type[5][0].name == "Blue keycard" and by_type[5][0].category == "Key"
+    assert by_type[2001][0].category == "Weapon"
+    assert by_type[1][0].category == "Player start"
+
+
+def test_thing_flags_and_unknown_types():
+    from dww_launcher.mapdata import Thing
+
+    t = Thing(3005, 0, 0, uv=True, single=True, angle=135, skills=(False, False, True), ambush=True)
+    assert t.describe().splitlines()[2:] == ["Skills: hard · ambush", "At (0, 0), facing north-west"]
+    odd = Thing(31337, 1.5, -2.5, uv=True, single=True)
+    assert odd.name == "Unknown thing (type 31337)" and odd.category == "Other"
+
+
+def test_udmf_thing_flags():
+    lumps = [("MAP07", b""), ("TEXTMAP", UDMF), ("ENDMAP", b"")]
+    m = load_map(WadFile(build_wad("PWAD", lumps)), "MAP07")
+    assert m.things[0].skills == (False, False, True)
+    assert m.things[1].skills == (True, False, False)

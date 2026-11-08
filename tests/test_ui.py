@@ -1006,3 +1006,53 @@ def test_browser_size_layout_and_layers_persist(qapp, browse_dir, tmp_path, monk
     assert w2.file_browser.main_split.saveState() == w.file_browser.main_split.saveState()
     assert sizes[0] < sizes[1]
     w2.file_browser.stop()
+
+
+# ------------------------------------------------------------ hover tooltips
+
+def test_hover_highlights_and_describes_things(preview):
+    from PySide6.QtCore import QEvent, QPoint, QPointF
+    from PySide6.QtGui import QHelpEvent
+    from PySide6.QtTest import QTest
+    from PySide6.QtWidgets import QToolTip
+
+    preview.set_layer("things", True)
+    preview.show()
+    imp = preview._things["monster"][0]
+    c = preview.map_to_screen(imp.x, imp.y)
+    assert [t.name for _, t in preview.markers_at(c)][:1] == ["Imp"]
+    assert preview.tooltip_for(c).startswith("Imp\nMonster · type 3001")
+
+    QTest.mouseMove(preview, c.toPoint())
+    assert [t for _, t in preview._hover][:1] == [imp]
+    preview.grab()  # paints the highlight without errors
+
+    preview.event(QHelpEvent(QEvent.Type.ToolTip, c.toPoint(), preview.mapToGlobal(c.toPoint())))
+    assert QToolTip.text().startswith("Imp")
+
+    far = QPoint(2, 2)
+    QTest.mouseMove(preview, far)
+    assert preview._hover == []
+    preview.usage_hint = "hint"
+    preview.event(QHelpEvent(QEvent.Type.ToolTip, far, preview.mapToGlobal(far)))
+    assert QToolTip.text() == "hint"
+
+    preview.set_layer("things", False)  # hidden things can't be hovered
+    assert preview.markers_at(c) == [] and preview._hover == []
+    key = preview._things["key"][0]
+    assert preview.tooltip_for(preview.map_to_screen(key.x, key.y)).startswith("Blue keycard\nKey")
+
+
+def test_hover_lists_stacked_things(qapp):
+    from dww_launcher.mapdata import MapData, Thing
+    from dww_launcher.ui.map_view import MapPreview
+
+    m = MapData("MAP01", "Doom", vertices=[(0, 0), (512, 512)])
+    m.lines = [__import__("dww_launcher.mapdata", fromlist=["Line"]).Line(0, 1, 0, False)]
+    m.things = [Thing(3001, 100, 100, True, True) for _ in range(5)]
+    pv = MapPreview()
+    pv.resize(300, 300)
+    pv.set_map(m)
+    pv.set_layer("things", True)
+    text = pv.tooltip_for(pv.map_to_screen(100, 100))
+    assert text.count("Imp") == 3 and text.endswith("…and 2 more here")

@@ -35,6 +35,57 @@ DOOM_EXITS = {11: "normal", 52: "normal", 197: "normal", 51: "secret", 124: "sec
 HEXEN_EXITS = {243: "normal", 74: "normal", 75: "normal", 244: "secret"}
 
 
+def _things(category: str, names: dict[int, str]) -> dict[int, tuple[str, str]]:
+    return {t: (n, category) for t, n in names.items()}
+
+
+# Doom / Doom II thing types: name and category, for map tooltips.
+THING_INFO: dict[int, tuple[str, str]] = {
+    **_things("Monster", MONSTERS),
+    **_things("Monster", {88: "Icon of Sin (boss brain)", 89: "Monster spawner", 87: "Spawn spot",
+                          72: "Commander Keen", 888: "Helper dog (MBF)"}),
+    **_things("Player start", {1: "Player 1 start", 2: "Player 2 start", 3: "Player 3 start",
+                               4: "Player 4 start", 11: "Deathmatch start"}),
+    **_things("Teleport", {14: "Teleport destination"}),
+    **_things("Weapon", WEAPONS),
+    **_things("Key", KEYS),
+    **_things("Ammo", {2007: "Ammo clip", 2048: "Box of ammo", 2008: "Shotgun shells",
+                       2049: "Box of shells", 2010: "Rocket", 2046: "Box of rockets",
+                       2047: "Energy cell", 17: "Energy cell pack", 8: "Backpack"}),
+    **_things("Health", {2011: "Stimpack", 2012: "Medikit", 2014: "Health bonus",
+                         2013: "Soulsphere", 83: "Megasphere"}),
+    **_things("Armor", {2015: "Armor bonus", 2018: "Green armor", 2019: "Blue armor"}),
+    **_things("Power-up", {2022: "Invulnerability", 2023: "Berserk", 2024: "Partial invisibility",
+                           2025: "Radiation suit", 2026: "Computer area map",
+                           2045: "Light amplification visor"}),
+    **_things("Obstacle", {2035: "Exploding barrel", 70: "Burning barrel", 2028: "Floor lamp",
+                           85: "Tall techno lamp", 86: "Short techno lamp", 34: "Candle",
+                           35: "Candelabra", 44: "Tall blue firestick", 45: "Tall green firestick",
+                           46: "Tall red firestick", 55: "Short blue firestick",
+                           56: "Short green firestick", 57: "Short red firestick",
+                           48: "Tall techno column", 30: "Tall green pillar", 32: "Tall red pillar",
+                           31: "Short green pillar", 33: "Short red pillar",
+                           36: "Short green pillar with heart", 37: "Short red pillar with skull",
+                           47: "Stalagmite", 43: "Burnt tree", 54: "Large brown tree",
+                           41: "Evil eye", 42: "Floating skull rock", 25: "Impaled human",
+                           26: "Twitching impaled human", 27: "Skull on a pole",
+                           28: "Skull shish kebab", 29: "Pile of skulls and candles",
+                           49: "Hanging victim, twitching", 50: "Hanging victim, arms out",
+                           51: "Hanging victim, one-legged", 52: "Hanging pair of legs",
+                           53: "Hanging leg", 73: "Hanging victim, guts removed",
+                           74: "Hanging victim, guts and brain removed",
+                           75: "Hanging torso, looking down", 76: "Hanging torso, open skull",
+                           77: "Hanging torso, looking up", 78: "Hanging torso, brain removed"}),
+    **_things("Decoration", {59: "Hanging victim, arms out", 60: "Hanging pair of legs",
+                             61: "Hanging victim, one-legged", 62: "Hanging leg",
+                             63: "Hanging victim, twitching", 10: "Bloody mess", 12: "Bloody mess",
+                             15: "Dead player", 18: "Dead zombieman", 19: "Dead shotgun guy",
+                             20: "Dead imp", 21: "Dead demon", 22: "Dead cacodemon",
+                             23: "Dead lost soul", 24: "Pool of blood and guts", 79: "Pool of blood",
+                             80: "Pool of blood", 81: "Pool of brains"}),
+}
+
+
 class MapError(Exception):
     pass
 
@@ -56,6 +107,36 @@ class Thing:
     y: float
     uv: bool  # present on Ultra-Violence
     single: bool  # present in single player
+    angle: int = 0  # degrees, 0 = east, counter-clockwise
+    skills: tuple[bool, bool, bool] = (True, True, True)  # easy (1-2), medium (3), hard (4-5)
+    ambush: bool = False  # "deaf" monster
+
+    @property
+    def name(self) -> str:
+        return THING_INFO.get(self.type, (f"Unknown thing (type {self.type})", "Other"))[0]
+
+    @property
+    def category(self) -> str:
+        return THING_INFO.get(self.type, ("", "Other"))[1]
+
+    def describe(self) -> str:
+        """Multi-line description for a tooltip."""
+        lines = [self.name, f"{self.category} · type {self.type}"]
+        skill_names = [n for n, on in zip(("easy", "medium", "hard"), self.skills) if on]
+        notes = ["all skills" if len(skill_names) == 3 else
+                 ("skills: " + ", ".join(skill_names) if skill_names else "no skill level")]
+        if not self.single:
+            notes.append("multiplayer only")
+        if self.ambush:
+            notes.append("ambush")
+        lines.append(" · ".join(notes).capitalize())
+        lines.append(f"At ({int(self.x)}, {int(self.y)}), facing {_compass(self.angle)}")
+        return "\n".join(lines)
+
+
+def _compass(angle: int) -> str:
+    names = ("east", "north-east", "north", "north-west", "west", "south-west", "south", "south-east")
+    return names[round((angle % 360) / 45) % 8]
 
 
 @dataclass
@@ -156,6 +237,10 @@ def load_map(wad: WadFile, name: str) -> MapData:
         raise MapError(f"{name}: {exc}") from exc
 
 
+def _skills(flags: int) -> tuple[bool, bool, bool]:
+    return bool(flags & 1), bool(flags & 2), bool(flags & 4)
+
+
 def _parse_binary(name: str, data: dict[str, bytes], hexen: bool) -> MapData:
     m = MapData(name=name, format="Hexen" if hexen else "Doom")
     v = data.get("VERTEXES", b"")
@@ -174,11 +259,13 @@ def _parse_binary(name: str, data: dict[str, bytes], hexen: bool) -> MapData:
 
     th = data.get("THINGS", b"")
     if hexen:  # tid, x, y, z, angle, type, flags, special, 5 args
-        for _tid, x, y, _z, _a, ttype, flags, *_rest in struct.iter_unpack("<hhhhhhhB5B", th[:len(th) // 20 * 20]):
-            m.things.append(Thing(ttype, x, y, uv=bool(flags & 0x0004), single=bool(flags & 0x0100)))
+        for _tid, x, y, _z, angle, ttype, flags, *_rest in struct.iter_unpack("<hhhhhhhB5B", th[:len(th) // 20 * 20]):
+            m.things.append(Thing(ttype, x, y, uv=bool(flags & 0x0004), single=bool(flags & 0x0100),
+                                  angle=angle, skills=_skills(flags), ambush=bool(flags & 0x0008)))
     else:  # x, y, angle, type, flags
-        for x, y, _a, ttype, flags in struct.iter_unpack("<hhhhh", th[:len(th) // 10 * 10]):
-            m.things.append(Thing(ttype, x, y, uv=bool(flags & 0x0004), single=not flags & 0x0010))
+        for x, y, angle, ttype, flags in struct.iter_unpack("<hhhhh", th[:len(th) // 10 * 10]):
+            m.things.append(Thing(ttype, x, y, uv=bool(flags & 0x0004), single=not flags & 0x0010,
+                                  angle=angle, skills=_skills(flags), ambush=bool(flags & 0x0008)))
 
     sec = data.get("SECTORS", b"")
     for _fl, _ce, _ft, _ct, _light, special, _tag in struct.iter_unpack("<hh8s8shhh", sec[:len(sec) // 26 * 26]):
@@ -232,8 +319,11 @@ def _parse_udmf(name: str, text: bytes) -> MapData:
             m.sector_specials.append(special)
             m.sector_secret.append(f.get("secret") is True or bool(special & 1024) or special in (9, 195))
         elif kind == "thing":
+            skills = (bool(f.get("skill1") or f.get("skill2")), bool(f.get("skill3")),
+                      bool(f.get("skill4") or f.get("skill5")))
             m.things.append(Thing(int(f.get("type", 0)), float(f.get("x", 0)), float(f.get("y", 0)),
-                                  uv=bool(f.get("skill4")), single=bool(f.get("single"))))
+                                  uv=bool(f.get("skill4")), single=bool(f.get("single")),
+                                  angle=int(f.get("angle", 0)), skills=skills, ambush=bool(f.get("ambush"))))
     return m
 
 
