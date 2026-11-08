@@ -58,6 +58,39 @@ playing back and packaging demos.
   You're asked about this on first launch.
 - **Options → Re-download Spreadsheet Data Now** for a manual refresh.
 
+## Downloads
+
+Standalone builds (no Python needed) are produced by GitHub Actions for:
+
+| Platform | File | How to run |
+|---|---|---|
+| Windows 10/11 (x64) | `dww-launcher-<version>-windows-x64.zip` | Extract, run `dww-launcher.exe` |
+| macOS 11+ (Apple Silicon) | `dww-launcher-<version>-macos-arm64.zip` | Extract, open `DWW Launcher.app` |
+| Linux (x86_64, glibc 2.35+) | `dww-launcher-<version>-linux-x86_64.tar.gz` | Extract, run `dww-launcher/dww-launcher` |
+
+- Tagged versions are on the [Releases](../../releases) page. Builds of every push are attached to
+  the workflow runs on the [Actions](../../actions) tab.
+- The builds are not code-signed yet. Windows SmartScreen may warn ("More info → Run anyway").
+  macOS will refuse to open the app the first time: right-click it and choose **Open**, or allow
+  it in **System Settings → Privacy & Security**.
+- On Linux, Qt needs `libxcb-cursor0` (Debian/Ubuntu: `sudo apt install libxcb-cursor0`), which
+  some distributions don't install by default.
+
+### Making a release
+
+1. Bump `__version__` in `src/dww_launcher/__init__.py` and commit.
+2. Tag and push: `git tag v0.2.0 && git push origin v0.2.0`.
+   The tag must match `__version__`, or the build fails.
+
+### Building locally
+
+```bash
+pip install . pyinstaller
+pyinstaller packaging/dww-launcher.spec
+```
+
+The result is in `dist/`. Run it with `--smoke-test` to check that it starts.
+
 ## Running from source
 
 Requires Python 3.10+.
@@ -89,6 +122,10 @@ src/dww_launcher/
   sheet_download.py   background CSV download (Qt networking)
   submission.py       spreadsheet lookup, comment checks, submission text/zip
   config.py           persistent settings (JSON in the OS config dir)
+  icons.py            application icon (resources/)
   ui/main_window.py   the main window
+packaging/            PyInstaller spec and entry point
+scripts/make_icons.py regenerates the icon files from resources/icon_source.png
+.github/workflows/    CI: tests on all platforms, builds executables, publishes releases
 tests/
 ```
