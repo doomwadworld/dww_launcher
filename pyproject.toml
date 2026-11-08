@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dww-launcher"
+version = "0.1.0"
+description = "Doom WAD World Launcher - launch classic Doom with any source port, IWAD and mods; record and package demos."
+readme = "readme.md"
+requires-python = ">=3.10"
+dependencies = [
+    "PySide6>=6.6",
+    "platformdirs>=4.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "pillow>=10"]  # pillow: scripts/make_icons.py
+
+[project.gui-scripts]
+dww-launcher = "dww_launcher.app:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+dww_launcher = ["resources/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
