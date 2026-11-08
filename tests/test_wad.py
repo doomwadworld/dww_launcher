@@ -1,6 +1,9 @@
 import pytest
 
-from dww_launcher.wad import WadError, map_sort_key, read_wad, warp_args
+import os
+from datetime import datetime
+
+from dww_launcher.wad import WadError, is_v12_era, map_sort_key, read_wad, warp_args
 
 
 def test_read_iwad_doom2(wad_factory):
@@ -58,3 +61,25 @@ def test_warp_args():
 def test_map_sort_key():
     assert sorted(["MAP10", "MAP02", "MAP01"], key=map_sort_key) == ["MAP01", "MAP02", "MAP10"]
     assert sorted(["E2M1", "E1M9", "E1M1"], key=map_sort_key) == ["E1M1", "E1M9", "E2M1"]
+
+
+def test_is_doom1(wad_factory):
+    assert read_wad(wad_factory("doom.wad", "IWAD", ["E1M1", "E2M1"])).is_doom1
+    assert not read_wad(wad_factory("doom2.wad", "IWAD", ["MAP01"])).is_doom1
+    assert not read_wad(wad_factory("fd1.wad", "IWAD", ["FREEDOOM", "E1M1"])).is_doom1
+
+
+@pytest.mark.parametrize("when,expected", [
+    (datetime(1993, 12, 9, 12), False),
+    (datetime(1993, 12, 10, 12), True),
+    (datetime(1994, 5, 1, 12), True),
+    (datetime(1994, 9, 1, 12), True),
+    (datetime(1994, 9, 2, 12), False),
+    (datetime(2020, 1, 1, 12), False),
+])
+def test_v12_era(tmp_path, when, expected):
+    p = tmp_path / "old.wad"
+    p.write_bytes(b"x")
+    ts = when.timestamp()
+    os.utime(p, (ts, ts))
+    assert is_v12_era(p) is expected

@@ -52,3 +52,16 @@ def test_resolve_app_bundle(tmp_path):
     assert resolve_executable(bundle) == exe
     plain = tmp_path / "dsda-doom"
     assert resolve_executable(plain) == plain
+
+
+def test_tas_and_dsdademo():
+    opts = LaunchOptions(iwad="doom2.wad", tas=True, dsdademo=True, record="/d/x")
+    assert build_args(opts) == ["-iwad", "doom2.wad", "-tas", "-dsdademo", "-record", "/d/x"]
+
+
+def test_timedemo_and_skipsec():
+    opts = LaunchOptions(iwad="doom2.wad", playdemo="d.lmp", timedemo=True, skipsec="90")
+    assert build_args(opts) == ["-iwad", "doom2.wad", "-timedemo", "d.lmp", "-skipsec", "90"]
+    opts.timedemo = False
+    opts.skipsec = None
+    assert build_args(opts) == ["-iwad", "doom2.wad", "-playdemo", "d.lmp"]

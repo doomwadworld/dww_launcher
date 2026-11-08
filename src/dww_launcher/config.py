@@ -28,6 +28,8 @@ class Settings:
     last_iwad: str = ""
     last_pwads: list[str] = field(default_factory=list)
     last_extra_args: str = ""
+    auto_sequence: bool = True
+    keep_latest_attempt: bool = False
 
     @classmethod
     def load(cls, path: Path | None = None) -> "Settings":

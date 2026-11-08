@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 import struct
 from dataclasses import dataclass, field
+from datetime import date, datetime
 from pathlib import Path
 
 _MAP_RE = re.compile(r"^(E[1-9]M[1-9]|MAP[0-9]{2})$")
@@ -26,9 +27,34 @@ class WadInfo:
         return self.kind == "IWAD"
 
     @property
+    def is_doom1(self) -> bool:
+        """True for the original episodic Doom IWADs (shareware, registered, Ultimate)."""
+        return self.game in DOOM1_GAMES
+
+    @property
     def game(self) -> str:
         """Best-guess human-readable name of the game this IWAD provides."""
         return identify_game(self.lumps, self.maps)
+
+
+DOOM1_GAMES = {"Doom (shareware)", "Doom (registered)", "The Ultimate Doom"}
+
+# Doom was released on 1993-12-10; by 1994-09-01 most mappers had moved on from v1.2.
+V12_ERA_START = date(1993, 12, 10)
+V12_ERA_END = date(1994, 9, 1)
+
+
+def file_date(path: str | Path) -> date | None:
+    try:
+        return datetime.fromtimestamp(Path(path).stat().st_mtime).date()
+    except OSError:
+        return None
+
+
+def is_v12_era(path: str | Path) -> bool:
+    """True if the file's modification date falls in the Doom v1.2 era."""
+    d = file_date(path)
+    return d is not None and V12_ERA_START <= d <= V12_ERA_END
 
 
 def read_wad(path: str | Path) -> WadInfo:
