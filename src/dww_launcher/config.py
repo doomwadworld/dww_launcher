@@ -32,6 +32,8 @@ class Settings:
     keep_latest_attempt: bool = False
     txt_dir: str = ""  # folder for the submission text file
     txt_dir_same_as_demo: bool = True
+    file_browser_dir: str = ""
+    file_browser_visible: bool = False
     auto_download: bool | None = None  # None = never asked
     sheets_downloaded_at: str = ""  # ISO timestamp (UTC) of the last successful download
 

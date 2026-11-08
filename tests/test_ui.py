@@ -12,7 +12,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 pytest.importorskip("PySide6")
 
-from PySide6.QtCore import QEventLoop, QTimer  # noqa: E402
+from PySide6.QtCore import QEventLoop, Qt, QTimer  # noqa: E402
 from PySide6.QtWidgets import QApplication, QFileDialog, QInputDialog, QMessageBox  # noqa: E402
 
 from dww_launcher.config import Settings  # noqa: E402
@@ -647,3 +647,217 @@ def test_source_port_gets_clean_environment(qapp, tmp_path, wad_factory, monkeyp
     log = w.log.toPlainText()
     assert "CHILD LD_LIBRARY_PATH=/usr/lib/custom" in log
     assert "CHILD QT_PLUGIN_PATH=<unset>" in log
+
+
+# ------------------------------------------------------------ file browser
+
+DEMO_DIR = Path(__file__).parent / "data" / "demos"
+
+
+@pytest.fixture
+def browse_dir(tmp_path, mapwad):
+    import shutil
+    import zipfile
+
+    from conftest import build_wad, doom_map_lumps
+
+    d = tmp_path / "wads"
+    d.mkdir()
+    (d / "sub").mkdir()
+    mapwad("wads/MULTI.WAD", ["MAP01", "MAP02", "MAP03"], extra=[("UMAPINFO", b'map MAP02 { levelname = "Two" }')])
+    mapwad("wads/single.pwd", ["MAP07"])
+    mapwad("wads/game.wad", ["E1M1", "E1M2"], kind="IWAD")
+    with zipfile.ZipFile(d / "pack.Pk3", "w") as zf:
+        zf.writestr("maps/MAP04.wad", build_wad("PWAD", doom_map_lumps("MAP04")))
+    shutil.copy(DEMO_DIR / "dsda_cl9_boom.lmp", d / "RUN.LMP")
+    (d / "fix.deh").write_text("Doom version = 21\n")
+    (d / "readme.txt").write_text("no")
+    (d / "song.mp3").write_bytes(b"no")
+    return d
+
+
+def wait_for_scan(fb, timeout=5000):
+    from PySide6.QtCore import QElapsedTimer, QThreadPool
+
+    QThreadPool.globalInstance().waitForDone(timeout)
+    timer = QElapsedTimer()
+    timer.start()
+    while timer.elapsed() < 500:
+        QApplication.processEvents()
+
+
+def browser_rows(fb):
+    return {fb.table.item(r, 0).text().replace("📁 ", ""): [fb.table.item(r, c).text() for c in range(7)]
+            for r in range(fb.table.rowCount())}
+
+
+def select(fb, name):
+    for r in range(fb.table.rowCount()):
+        if fb.table.item(r, 0).text().endswith(name):
+            fb.table.clearSelection()
+            fb.table.selectRow(r)
+            return r
+    raise AssertionError(name)
+
+
+def test_browser_lists_doom_files(qapp, browse_dir):
+    from dww_launcher.ui.file_browser import FileBrowser
+
+    fb = FileBrowser()
+    fb.set_directory(browse_dir)
+    wait_for_scan(fb)
+    rows = browser_rows(fb)
+    assert set(rows) == {"sub", "MULTI.WAD", "single.pwd", "game.wad", "pack.Pk3", "RUN.LMP", "fix.deh"}
+    assert rows["MULTI.WAD"][1:4] == ["PWAD", "3", "Doom II"]
+    assert rows["game.wad"][1:4] == ["IWAD", "2", "Doom (shareware)"]
+    assert rows["pack.Pk3"][1:3] == ["PK3", "1"]
+    assert rows["RUN.LMP"][1:5] == ["Demo", "MAP01 UV", "freedoom2.wad", "0:04.49"]
+    assert fb.table.item(0, 0).text() == "📁 sub"  # folders first
+
+    fb.table.sortByColumn(5, Qt.SortOrder.DescendingOrder)  # size, numerically
+    sizes = [fb.table.item(r, 5).data(Qt.ItemDataRole.UserRole + 1) for r in range(fb.table.rowCount())]
+    assert sizes == sorted(sizes, reverse=True)
+    fb.stop()
+
+
+def test_browser_detail_and_maps_tabs(qapp, browse_dir):
+    from dww_launcher.ui.file_browser import FileBrowser
+
+    fb = FileBrowser()
+    fb.set_directory(browse_dir)
+    wait_for_scan(fb)
+
+    select(fb, "MULTI.WAD")
+    detail = [fb.detail_tree.topLevelItem(i).text(0).strip() for i in range(fb.detail_tree.topLevelItemCount())]
+    assert detail[:2] == ["General", "Name"] and "DOOM" in detail and "Levels" in detail
+    assert fb.tabs.isTabVisible(1)
+    assert [fb.map_list.item(i).text() for i in range(3)] == ["MAP01", "MAP02   Two", "MAP03"]
+    assert not fb.map_list.isHidden()
+    assert fb.preview.map.name == "MAP01" and fb.preview.map.lines
+    fb.map_list.setCurrentRow(1)
+    stats = {fb.map_stats.topLevelItem(i).text(0): fb.map_stats.topLevelItem(i).text(1)
+             for i in range(fb.map_stats.topLevelItemCount())}
+    assert stats["MAP02"] == "Two" and stats["Exit linedef"] == "Yes" and stats["Monsters (UV)"] == "2"
+
+    select(fb, "single.pwd")
+    assert fb.tabs.isTabVisible(1) and fb.map_list.isHidden()  # one map: no list needed
+
+    select(fb, "pack.Pk3")
+    assert fb.preview.map.name == "MAP04"
+
+    select(fb, "RUN.LMP")
+    assert not fb.tabs.isTabVisible(1)
+    detail = {fb.detail_tree.topLevelItem(i).text(0).strip(): fb.detail_tree.topLevelItem(i).text(1)
+              for i in range(fb.detail_tree.topLevelItemCount())}
+    assert detail["Format"] == "Boom 2.02" and detail["Length"] == "0:04.49 (157 tics)"
+    fb.stop()
+
+
+def test_browser_navigation(qapp, browse_dir):
+    from dww_launcher.ui.file_browser import FileBrowser
+
+    fb = FileBrowser(places=lambda: [("Demo folder", str(browse_dir))])
+    fb.set_directory(browse_dir)
+    wait_for_scan(fb)
+    fb._on_double_click(fb.table.item(select(fb, "sub"), 0))
+    assert fb.directory == str((browse_dir / "sub").resolve())
+    fb.go_up()
+    assert fb.directory == str(browse_dir.resolve())
+    assert not fb.set_directory(browse_dir / "missing")
+    fb._fill_places()
+    assert any("Demo folder" in a.text() for a in fb.places_menu.actions())
+    fb.stop()
+
+
+def test_browser_actions_reach_launcher(qapp, browse_dir, tmp_path, monkeypatch, no_dialogs):
+    w = MainWindow(Settings(demo_dir=str(tmp_path), file_browser_dir=str(browse_dir), auto_download=False))
+    started = []
+    monkeypatch.setattr(w, "_start", lambda opts: started.append(opts))
+    w.set_file_browser_visible(True)
+    fb = w.file_browser
+    wait_for_scan(fb)
+    assert fb.directory == str(browse_dir.resolve())
+
+    # Double-click: PWAD -> mods, IWAD -> IWAD, demo -> play
+    fb._on_double_click(fb.table.item(select(fb, "MULTI.WAD"), 0))
+    assert w.pwad_list.paths() == [str(browse_dir / "MULTI.WAD")]
+    assert w.map_combo.currentData() == "MAP01"  # first level of the added mod selected
+    fb._on_double_click(fb.table.item(select(fb, "game.wad"), 0))
+    assert w.iwad_combo.currentData() == str(browse_dir / "game.wad")
+    assert str(browse_dir / "game.wad") not in w.pwad_list.paths()
+    fb._on_double_click(fb.table.item(select(fb, "RUN.LMP"), 0))
+    assert started and started[0].playdemo == str(browse_dir / "RUN.LMP")
+
+    # Context menu with several files selected
+    fb.table.clearSelection()
+    for name in ("single.pwd", "pack.Pk3", "fix.deh", "game.wad"):
+        r = [r for r in range(fb.table.rowCount()) if fb.table.item(r, 0).text() == name][0]
+        fb.table.selectionModel().select(fb.table.model().index(r, 0),
+                                         fb.table.selectionModel().SelectionFlag.Select
+                                         | fb.table.selectionModel().SelectionFlag.Rows)
+    actions = {a.text(): a for a in fb.context_actions(fb.selected_paths())}
+    assert "Add to Mods (3)" in actions and "Use as IWAD" not in actions  # IWAD isn't a mod
+    actions["Add to Mods (3)"].trigger()
+    assert {Path(p).name for p in w.pwad_list.paths()} == {"MULTI.WAD", "single.pwd", "pack.Pk3", "fix.deh"}
+
+    select(fb, "game.wad")
+    assert "Use as IWAD" in {a.text() for a in fb.context_actions(fb.selected_paths())}
+    select(fb, "RUN.LMP")
+    assert "Play Demo" in {a.text() for a in fb.context_actions(fb.selected_paths())}
+
+
+def test_browser_window_grows_and_shrinks(qapp, tmp_path):
+    w = MainWindow(Settings(demo_dir=str(tmp_path), auto_download=False))
+    w.resize(700, 800)
+    w.show()
+    qapp.processEvents()
+    before = w.width()
+    w.browser_action.setChecked(True)
+    qapp.processEvents()
+    assert w.browser_dock.isVisible()
+    grown = w.width()
+    assert grown >= before
+    w.browser_action.setChecked(False)
+    qapp.processEvents()
+    assert not w.browser_dock.isVisible()
+    assert w.width() == before  # back to exactly the original width
+    w.browser_dock.close()  # closing via the dock's X keeps the toolbar button in sync
+    assert not w.browser_action.isChecked()
+
+
+def test_browser_state_is_saved(qapp, browse_dir, tmp_path):
+    s = Settings(demo_dir=str(tmp_path), file_browser_dir=str(browse_dir), file_browser_visible=True,
+                 auto_download=False)
+    w = MainWindow(s)
+    assert w.browser_action.isChecked()
+    w.file_browser.set_directory(browse_dir / "sub")
+    w._save_state()
+    assert s.file_browser_dir == str((browse_dir / "sub").resolve()) and s.file_browser_visible
+    w.file_browser.stop()
+
+
+# ------------------------------------------------------------------ Ctrl+C
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX signal delivery")
+def test_ctrl_c_quits(qapp, tmp_path):
+    import signal
+
+    from dww_launcher.app import install_interrupt_handler
+
+    saved = []
+    w = MainWindow(Settings(demo_dir=str(tmp_path), auto_download=False))
+    w.settings.save = lambda path=None: saved.append(True)
+    w.show()
+    old = signal.getsignal(signal.SIGINT), signal.getsignal(signal.SIGTERM)
+    try:
+        install_interrupt_handler(qapp, w)
+        QTimer.singleShot(100, lambda: os.kill(os.getpid(), signal.SIGINT))
+        QTimer.singleShot(5000, qapp.quit)  # safety net
+        timer = __import__("time").monotonic()
+        qapp.exec()
+        assert __import__("time").monotonic() - timer < 4  # quit by the signal, not the safety net
+        assert not w.isVisible() and saved  # window closed and settings saved
+    finally:
+        signal.signal(signal.SIGINT, old[0])
+        signal.signal(signal.SIGTERM, old[1])
+        qapp._interrupt_timer.stop()

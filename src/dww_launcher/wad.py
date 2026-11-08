@@ -1,7 +1,8 @@
-"""Minimal WAD file reader: header, lump directory, map list and IWAD detection."""
+"""WAD file reading: header, lump directory and contents, map list and IWAD detection."""
 
 from __future__ import annotations
 
+import io
 import re
 import struct
 from dataclasses import dataclass, field
@@ -15,12 +16,20 @@ class WadError(Exception):
     """Raised when a file is not a readable WAD."""
 
 
+@dataclass(frozen=True)
+class Lump:
+    name: str
+    offset: int
+    size: int
+
+
 @dataclass
 class WadInfo:
     path: Path
     kind: str  # "IWAD" or "PWAD"
     lumps: list[str] = field(default_factory=list)
-    maps: list[str] = field(default_factory=list)
+    maps: list[str] = field(default_factory=list)  # standard ExMy / MAPxx names, for -warp
+    directory: list[Lump] = field(default_factory=list)
 
     @property
     def is_iwad(self) -> bool:
@@ -57,32 +66,81 @@ def is_v12_era(path: str | Path) -> bool:
     return d is not None and V12_ERA_START <= d <= V12_ERA_END
 
 
+def _read_directory(f, name: str) -> tuple[str, list[Lump]]:
+    header = f.read(12)
+    if len(header) != 12:
+        raise WadError(f"{name}: file too small to be a WAD")
+    ident, num_lumps, dir_offset = struct.unpack("<4sii", header)
+    kind = ident.decode("ascii", errors="replace")
+    if kind not in ("IWAD", "PWAD"):
+        raise WadError(f"{name}: not a WAD file (header {ident!r})")
+    if num_lumps < 0 or dir_offset < 0 or num_lumps > 1_000_000:
+        raise WadError(f"{name}: corrupt WAD header")
+    f.seek(dir_offset)
+    raw = f.read(16 * num_lumps)
+    if len(raw) != 16 * num_lumps:
+        raise WadError(f"{name}: truncated lump directory")
+    lumps = []
+    for i in range(num_lumps):
+        offset, size, raw_name = struct.unpack_from("<ii8s", raw, i * 16)
+        lumps.append(Lump(raw_name.split(b"\0", 1)[0].decode("ascii", errors="replace").upper(),
+                          offset, size))
+    return kind, lumps
+
+
+class WadFile:
+    """Random access to a WAD's lumps, from a file or from bytes (e.g. a map inside a PK3)."""
+
+    def __init__(self, source: str | Path | bytes, name: str = ""):
+        self._data = source if isinstance(source, (bytes, bytearray)) else None
+        self.path = None if self._data is not None else Path(source)
+        self.name = name or (self.path.name if self.path else "WAD")
+        try:
+            if self._data is not None:
+                self.kind, self.lumps = _read_directory(io.BytesIO(self._data), self.name)
+            else:
+                with self.path.open("rb") as f:
+                    self.kind, self.lumps = _read_directory(f, self.name)
+        except OSError as exc:
+            raise WadError(f"{self.name}: {exc}") from exc
+
+    @property
+    def names(self) -> list[str]:
+        return [lump.name for lump in self.lumps]
+
+    def read(self, lump: Lump | int) -> bytes:
+        if isinstance(lump, int):
+            lump = self.lumps[lump]
+        if lump.size <= 0:
+            return b""
+        if self._data is not None:
+            return bytes(self._data[lump.offset:lump.offset + lump.size])
+        try:
+            with self.path.open("rb") as f:
+                f.seek(lump.offset)
+                return f.read(lump.size)
+        except OSError as exc:
+            raise WadError(f"{self.name}: {exc}") from exc
+
+    def find(self, name: str, start: int = 0) -> int:
+        """Index of the first lump called ``name`` at or after ``start`` (-1 if none)."""
+        name = name.upper()
+        for i in range(start, len(self.lumps)):
+            if self.lumps[i].name == name:
+                return i
+        return -1
+
+
 def read_wad(path: str | Path) -> WadInfo:
     path = Path(path)
     try:
         with path.open("rb") as f:
-            header = f.read(12)
-            if len(header) != 12:
-                raise WadError(f"{path.name}: file too small to be a WAD")
-            ident, num_lumps, dir_offset = struct.unpack("<4sii", header)
-            kind = ident.decode("ascii", errors="replace")
-            if kind not in ("IWAD", "PWAD"):
-                raise WadError(f"{path.name}: not a WAD file (header {ident!r})")
-            if num_lumps < 0 or dir_offset < 0:
-                raise WadError(f"{path.name}: corrupt WAD header")
-            f.seek(dir_offset)
-            directory = f.read(16 * num_lumps)
-            if len(directory) != 16 * num_lumps:
-                raise WadError(f"{path.name}: truncated lump directory")
+            kind, directory = _read_directory(f, path.name)
     except OSError as exc:
         raise WadError(f"{path.name}: {exc}") from exc
-
-    lumps = []
-    for i in range(num_lumps):
-        _, _, raw_name = struct.unpack_from("<ii8s", directory, i * 16)
-        lumps.append(raw_name.split(b"\0", 1)[0].decode("ascii", errors="replace").upper())
+    lumps = [lump.name for lump in directory]
     maps = list(dict.fromkeys(name for name in lumps if _MAP_RE.match(name)))
-    return WadInfo(path=path, kind=kind, lumps=lumps, maps=maps)
+    return WadInfo(path=path, kind=kind, lumps=lumps, maps=maps, directory=directory)
 
 
 def identify_game(lumps: list[str], maps: list[str]) -> str:
