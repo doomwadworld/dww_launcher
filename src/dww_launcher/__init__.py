@@ -1,3 +1,3 @@
-"""Doom WAD World Launcher."""
+"""DOOM WAD World Launcher."""
 
 __version__ = "0.1.0"

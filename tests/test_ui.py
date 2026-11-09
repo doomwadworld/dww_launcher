@@ -1,6 +1,7 @@
 """GUI tests with a fake source port (run headless via QT_QPA_PLATFORM=offscreen)."""
 
 import os
+import struct
 import sys
 import zipfile
 from datetime import datetime
@@ -998,7 +999,7 @@ def test_browser_size_layout_and_layers_persist(qapp, browse_dir, tmp_path, monk
                 if viewer.thing_filter.tree.topLevelItem(i).text(0) == "Keys")
     keys.setCheckState(0, Qt.CheckState.Unchecked)
     w._save_state()
-    assert s.map_layers == {"secrets": True, "exits": False,
+    assert s.map_layers == {"secrets": True, "exits": False, "keydoors": True,
                             "hidden_categories": ["Decoration", "Key", "Obstacle", "Other", "Teleport"],
                             "hidden_types": [2, 3, 4, 11]}
     assert set(s.file_browser_state) == {"main_split", "maps_split", "right_split", "columns"}
@@ -1218,3 +1219,156 @@ def test_exit_clusters_and_cycling(qapp):
     third = pv.jump_to_exit("exit", animate=False)
     assert first != second and third == first  # cycles through the exits
     assert pv.jump_to_exit("secret") is None
+
+
+# ------------------------------------------------------------ round 7
+
+def test_app_name_and_details_tab(qapp, tmp_path):
+    from dww_launcher.ui.file_browser import FileBrowser
+
+    w = MainWindow(Settings(demo_dir=str(tmp_path), auto_download=False))
+    assert w.windowTitle() == "DOOM WAD World Launcher"
+    fb = FileBrowser()
+    assert [fb.tabs.tabText(i) for i in range(fb.tabs.count())] == ["Details", "Maps"]
+
+
+def test_mod_maps_only(qapp, tmp_path, wad_factory, monkeypatch):
+    iwad = wad_factory("doom2.wad", "IWAD", ["MAP01", "MAP02", "MAP03"])
+    pwad = wad_factory("mod.wad", "PWAD", ["MAP02", "MAP33"])
+    s = Settings(iwads=[str(iwad)], last_pwads=[str(pwad)], demo_dir=str(tmp_path), auto_download=False)
+    w = MainWindow(s)
+    def maps():
+        return [w.map_combo.itemData(i) for i in range(w.map_combo.count())]
+    assert maps() == [None, "MAP01", "MAP02", "MAP03", "MAP33"]
+    w._select_data(w.map_combo, "MAP01")
+    w.mod_maps_check.setChecked(True)
+    assert maps() == [None, "MAP02", "MAP33"]
+    assert w.map_combo.currentData() is None  # MAP01 is no longer listed
+    w._save_state()
+    assert s.mod_maps_only
+    assert w.capture_profile().mod_maps_only
+    w.mod_maps_check.setChecked(False)
+    assert maps()[1:4] == ["MAP01", "MAP02", "MAP03"]
+    assert MainWindow(s).mod_maps_check.isChecked()  # restored next session
+
+
+def test_mods_context_menu_and_reveal(qapp, browse_dir, tmp_path, monkeypatch, no_dialogs):
+    import dww_launcher.ui.main_window as mwmod
+
+    mod = str(browse_dir / "MULTI.WAD")
+    w = MainWindow(Settings(demo_dir=str(tmp_path), last_pwads=[mod, str(browse_dir / "fix.deh")],
+                            auto_download=False))
+    w.pwad_list.resize(500, 100)
+    w.pwad_list.grab()  # the folder column paints
+    actions = {a.text(): a for a in w.mods_context_actions([mod])}
+    assert list(actions) == ["Show in File Browser", "Open Containing Folder", "Copy Path", "Remove"]
+    assert [a.text() for a in w.mods_context_actions([mod, str(browse_dir / "fix.deh")])] == ["Copy Paths", "Remove (2)"]
+
+    opened = []
+    monkeypatch.setattr(mwmod, "open_folder", lambda p: opened.append(p) or True)
+    actions["Open Containing Folder"].trigger()
+    assert opened == [str(browse_dir)]
+
+    actions["Show in File Browser"].trigger()
+    fb = w.file_browser
+    assert w.browser_dock.isVisibleTo(w)
+    assert fb.directory == str(browse_dir.resolve())
+    assert fb.selected_paths() == [mod]
+
+    w.pwad_list.item(0).setSelected(True)
+    actions["Remove"].trigger()
+    assert w.pwad_list.paths() == [str(browse_dir / "fix.deh")]
+    fb.stop()
+
+
+def test_popout_replaces_docked_preview_and_syncs_lists(qapp, browse_dir):
+    from dww_launcher.ui.file_browser import FileBrowser
+
+    fb = FileBrowser()
+    fb.set_directory(browse_dir)
+    wait_for_scan(fb)
+    select(fb, "MULTI.WAD")
+    assert fb.viewer_stack.currentIndex() == 0 and fb.viewer.preview.map.name == "MAP01"
+
+    fb.pop_out_map()
+    win = fb.map_window
+    assert fb.viewer_stack.currentIndex() == 1  # the note replaces the docked preview
+    assert fb.viewer.preview.map is None  # ...which no longer draws anything
+    assert [win.map_list.item(i).text() for i in range(win.map_list.count())] == ["MAP01", "MAP02   Two", "MAP03"]
+    assert not win.map_list.isHidden() and win.map_list.currentRow() == 0
+
+    win.map_list.setCurrentRow(2)  # choosing in the window drives the panel
+    assert fb.map_list.currentRow() == 2 and win.viewer.preview.map.name == "MAP03"
+    fb.map_list.setCurrentRow(1)  # and the other way round
+    assert win.map_list.currentRow() == 1 and win.viewer.preview.map.name == "MAP02"
+    assert fb.viewer.preview.map is None
+
+    select(fb, "single.pwd")  # one map: the window's list is hidden
+    assert win.map_list.isHidden() and win.viewer.preview.map.name == "MAP07"
+
+    fb.bring_back_button.click()  # closes the window and restores the docked preview
+    assert fb.map_window is None and fb.viewer_stack.currentIndex() == 0
+    assert fb.viewer.preview.map.name == "MAP07"
+    fb.stop()
+
+
+def test_key_door_layer(qapp):
+    from conftest import build_wad, doom_map_lumps
+    from dww_launcher.mapdata import load_map
+    from dww_launcher.ui.map_view import MapViewer
+    from dww_launcher.wad import WadFile
+
+    lumps = doom_map_lumps()
+    linedefs = struct.pack("<HHHHHHH", 0, 4, 1, 26, 0, 0, 0xFFFF) + struct.pack("<HHHHHHH", 4, 1, 1, 135, 0, 1, 0xFFFF)
+    lumps = [(n, linedefs if n == "LINEDEFS" else d) for n, d in lumps]
+    viewer = MapViewer()
+    viewer.resize(700, 400)
+    viewer.show()  # Qt only delivers resize events to shown widgets
+    viewer.set_map(load_map(WadFile(build_wad("PWAD", lumps)), "MAP01"))
+    pv = viewer.preview
+    assert (len(pv._lines["key_blue"]), len(pv._lines["key_red"]), len(pv._lines["key_yellow"])) == (1, 1, 0)
+    assert viewer.checks["keydoors"].isChecked() and viewer.checks["keydoors"].text() == "Key doors"
+    viewer.grab()
+    viewer.checks["keydoors"].setChecked(False)
+    assert not pv.layers["keydoors"] and viewer.layers()["keydoors"] is False
+    viewer.grab()
+    viewer.resize(300, 400)  # narrow: icon-only toggles
+    qapp.processEvents()
+    assert viewer.checks["keydoors"].text() == "" and "Key doors" in viewer.checks["keydoors"].toolTip()
+    viewer.resize(800, 400)
+    qapp.processEvents()
+    assert viewer.checks["keydoors"].text() == "Key doors"
+    viewer.close()
+
+
+def test_detach_and_reattach_browser(qapp, browse_dir, tmp_path):
+    s = Settings(demo_dir=str(tmp_path), file_browser_dir=str(browse_dir), auto_download=False)
+    w = MainWindow(s)
+    w.show()
+    w.browser_action.setChecked(True)
+    qapp.processEvents()
+    fb = w.file_browser
+    assert not w.browser_dock.isFloating() and fb.detach_button.text() == "⧉ Detach"
+
+    fb.detach_button.click()
+    qapp.processEvents()
+    assert w.browser_dock.isFloating() and w.browser_dock.isVisible()
+    assert fb.detach_button.text() == "⇤ Attach" and s.file_browser_floating
+    w._save_state()
+    assert s.file_browser_floating and len(s.file_browser_float_geometry) == 4
+
+    fb.detach_button.click()
+    qapp.processEvents()
+    assert not w.browser_dock.isFloating() and not s.file_browser_floating
+
+    # A detached browser comes back detached next session
+    fb.detach_button.click()
+    qapp.processEvents()
+    w._save_state()
+    w.close()
+    fb.stop()
+    w2 = MainWindow(s)
+    w2.show()
+    qapp.processEvents()
+    assert w2.browser_dock.isFloating() and w2.browser_dock.isVisible()
+    w2.file_browser.stop()

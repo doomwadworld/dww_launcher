@@ -12,9 +12,11 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QHBoxLayout,
     QHeaderView,
+    QListWidget,
     QMenu,
     QPushButton,
     QSizePolicy,
+    QSplitter,
     QToolButton,
     QToolTip,
     QTreeWidget,
@@ -40,15 +42,18 @@ CATEGORY_LABELS = {"Monster": "Monsters", "Player start": "Player starts", "Key"
                    "Power-up": "Power-ups", "Obstacle": "Obstacles", "Decoration": "Decorations",
                    "Teleport": "Teleport destinations", "Other": "Other / unknown"}
 
-LAYERS = ("secrets", "exits")
+LAYERS = ("secrets", "exits", "keydoors")
+LAYER_LABELS = {"secrets": "Secrets", "exits": "Exits", "keydoors": "Key doors"}
 DEFAULT_LAYERS = {
     "secrets": True,
     "exits": True,
+    "keydoors": True,
     "hidden_categories": ["Decoration", "Obstacle", "Other", "Teleport"],
     "hidden_types": [2, 3, 4, 11],  # co-op and deathmatch starts: only player 1 by default
 }
 
 KEY_COLORS = {5: "#3d7bff", 40: "#3d7bff", 6: "#ffd21f", 39: "#ffd21f", 13: "#ff3b3b", 38: "#ff3b3b"}
+KEY_LINE_COLORS = {"red": "#ff3b3b", "yellow": "#ffd21f", "blue": "#3d7bff"}
 SKULL_KEYS = {38, 39, 40}
 
 # Drawing order: later kinds are drawn on top.
@@ -155,7 +160,7 @@ class MapPreview(QWidget):
 
     def _prepare(self, m: MapData) -> None:
         n = len(m.vertices)
-        groups = {"two": [], "one": [], "exit": [], "secret": []}
+        groups = {"two": [], "one": [], "exit": [], "secret": [], "key_red": [], "key_yellow": [], "key_blue": []}
         for line in m.lines:
             if line.v1 >= n or line.v2 >= n:
                 continue
@@ -164,6 +169,9 @@ class MapPreview(QWidget):
             kind = m.exit_kind(line)
             if kind:  # and highlighted on top when exits are shown
                 groups["secret" if kind == "secret" else "exit"].append(q)
+            colour = m.key_colour(line)
+            if colour:  # key-locked door or switch
+                groups[f"key_{colour}"].append(q)
         self._lines = groups
         self._exit_groups = {k: _cluster(groups[k]) for k in ("exit", "secret") if groups[k]}
 
@@ -506,6 +514,8 @@ class MapPreview(QWidget):
             p.drawPath(self._secret_path)
             p.setBrush(Qt.BrushStyle.NoBrush)
         line_styles = [("two", self.TWO_SIDED, 1.0), ("one", self.ONE_SIDED, 1.0)]
+        if self.layers.get("keydoors"):
+            line_styles += [(f"key_{c}", QColor(KEY_LINE_COLORS[c]), 2.5) for c in ("red", "yellow", "blue")]
         if self.layers.get("exits"):
             line_styles += [("exit", self.EXIT, 2.5), ("secret", self.SECRET_EXIT, 2.5)]
         for key, color, width in line_styles:
@@ -637,6 +647,13 @@ class MapPreview(QWidget):
         pix.fill(Qt.GlobalColor.transparent)
         p = QPainter(pix)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        if shape == "keylines":
+            w = (size.width() - 4) / 3
+            for i, c in enumerate(("red", "yellow", "blue")):
+                p.setPen(QPen(QColor(KEY_LINE_COLORS[c]), 3))
+                p.drawLine(QPointF(2 + i * w + 1, size.height() / 2), QPointF(2 + (i + 1) * w - 1, size.height() / 2))
+            p.end()
+            return QIcon(pix)
         color = QColor(color)
         if shape == "line":
             p.setPen(QPen(color, 3))
@@ -853,8 +870,10 @@ class MapViewer(QWidget):
     TOOLTIPS = {
         "secrets": "Secret sectors (purple)",
         "exits": "Highlight exit lines (orange) and secret exit lines (violet)",
+        "keydoors": "Highlight doors and switches that need a key, in the key's colour",
     }
-    LAYER_SWATCHES = {"secrets": (MapPreview.SECRET_EDGE, "patch"), "exits": (MapPreview.EXIT, "line")}
+    LAYER_SWATCHES = {"secrets": (MapPreview.SECRET_EDGE, "patch"), "exits": (MapPreview.EXIT, "line"),
+                      "keydoors": ("#ffffff", "keylines")}
 
     def __init__(self, popout_button: bool = True, parent=None):
         super().__init__(parent)
@@ -880,9 +899,9 @@ class MapViewer(QWidget):
 
         self.checks: dict[str, QCheckBox] = {}
         for name in LAYERS:
-            box = QCheckBox(name.capitalize())
+            box = QCheckBox(LAYER_LABELS[name])
             box.setChecked(DEFAULT_LAYERS[name])
-            box.setToolTip(self.TOOLTIPS[name])
+            box.setToolTip(f"{LAYER_LABELS[name]}: {self.TOOLTIPS[name]}")
             color, shape = self.LAYER_SWATCHES[name]
             box.setIcon(MapPreview.swatch(color, shape, QSize(22, 14)))
             box.setIconSize(QSize(22, 14))
@@ -912,6 +931,15 @@ class MapViewer(QWidget):
                                    "Hover over a thing to see what it is")
         self.fit_button.clicked.connect(self.preview.fit)
         layout.addWidget(self.preview, 1)
+
+    COMPACT_WIDTH = 560  # below this, toggles show only their icons
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        compact = self.width() < self.COMPACT_WIDTH
+        for name, box in self.checks.items():
+            box.setText("" if compact else LAYER_LABELS[name])
+        self.popout_button.setText("⧉" if compact else "⧉ Pop out")
 
     def set_map(self, m: MapData | None, message: str = "", sprites: SpriteSource | None = None) -> None:
         self.preview.set_map(m, message, sprites)
@@ -945,18 +973,43 @@ class MapViewer(QWidget):
 
 
 class MapWindow(QWidget):
-    """Stand-alone window holding a map viewer (the popped-out preview)."""
+    """Stand-alone window holding a map viewer (the popped-out preview) and a map list."""
 
     closed = Signal()
+    map_chosen = Signal(int)  # row in the map list
 
     def __init__(self, parent=None):
         super().__init__(parent, Qt.WindowType.Window)
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, False)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(4, 4, 4, 4)
+        self.split = QSplitter(Qt.Orientation.Horizontal)
         self.viewer = MapViewer(popout_button=False)
-        layout.addWidget(self.viewer)
-        self.resize(900, 720)
+        self.map_list = QListWidget()
+        self.map_list.setMinimumWidth(120)
+        self.map_list.currentRowChanged.connect(self._on_row)
+        self.split.addWidget(self.viewer)
+        self.split.addWidget(self.map_list)
+        self.split.setStretchFactor(0, 1)
+        self.split.setStretchFactor(1, 0)
+        self.split.setSizes([740, 160])
+        self.split.setChildrenCollapsible(False)
+        layout.addWidget(self.split)
+        self.resize(940, 720)
+
+    def set_maps(self, labels: list[str], current: int) -> None:
+        """The levels of the current file (the list is hidden when there's only one)."""
+        self.map_list.blockSignals(True)
+        self.map_list.clear()
+        self.map_list.addItems(labels)
+        if 0 <= current < len(labels):
+            self.map_list.setCurrentRow(current)
+        self.map_list.blockSignals(False)
+        self.map_list.setVisible(len(labels) > 1)
+
+    def _on_row(self, row: int) -> None:
+        if row >= 0:
+            self.map_chosen.emit(row)
 
     def show_map(self, m: MapData | None, title: str, message: str = "",
                  sprites: SpriteSource | None = None) -> None:

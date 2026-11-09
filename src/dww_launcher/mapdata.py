@@ -34,6 +34,19 @@ BOSS_BRAIN = 88
 DOOM_EXITS = {11: "normal", 52: "normal", 197: "normal", 51: "secret", 124: "secret", 198: "secret"}
 HEXEN_EXITS = {243: "normal", 74: "normal", 75: "normal", 244: "secret"}
 
+# Key-locked doors and switches.
+KEY_COLOURS = ("red", "yellow", "blue")
+DOOM_KEY_LINES = {26: "blue", 32: "blue", 99: "blue", 133: "blue",
+                  27: "yellow", 34: "yellow", 134: "yellow", 136: "yellow",
+                  28: "red", 33: "red", 135: "red", 137: "red"}
+# Boom generalised locked doors: key in bits 6-8 (0 = any key, 7 = all keys).
+BOOM_LOCKED_DOOR = range(0x3800, 0x3C00)
+BOOM_LOCK_KEYS = {1: "red", 2: "blue", 3: "yellow", 4: "red", 5: "blue", 6: "yellow"}
+# ZDoom lock numbers (Hexen-format and UDMF maps) and the specials that take one: special -> arg index.
+ZDOOM_LOCKS = {1: "red", 2: "blue", 3: "yellow", 4: "red", 5: "blue", 6: "yellow",
+               129: "red", 130: "blue", 131: "yellow"}
+ZDOOM_LOCK_ARG = {13: 3, 202: 4, 83: 4, 85: 4}  # Door_LockedRaise, Generic_Door, ACS_LockedExecute(Door)
+
 
 def _things(category: str, names: dict[int, str]) -> dict[int, tuple[str, str]]:
     return {t: (n, category) for t, n in names.items()}
@@ -98,6 +111,8 @@ class Line:
     two_sided: bool
     front: int = -1  # sidedef indices (-1 = none)
     back: int = -1
+    args: tuple[int, ...] = ()  # Hexen/UDMF special arguments
+    lock: int = 0  # UDMF "locknumber"
 
 
 @dataclass
@@ -154,6 +169,19 @@ class MapData:
     @property
     def secret_sectors(self) -> int:
         return sum(self.sector_secret)
+
+    def key_colour(self, line: Line) -> str | None:
+        """"red", "yellow" or "blue" for a door/switch that needs that key, else None."""
+        if self.format == "Doom":
+            if line.special in DOOM_KEY_LINES:
+                return DOOM_KEY_LINES[line.special]
+            if line.special in BOOM_LOCKED_DOOR:
+                return BOOM_LOCK_KEYS.get((line.special & 0x01C0) >> 6)
+            return None
+        lock = line.lock
+        if not lock and line.special in ZDOOM_LOCK_ARG and len(line.args) > ZDOOM_LOCK_ARG[line.special]:
+            lock = line.args[ZDOOM_LOCK_ARG[line.special]]
+        return ZDOOM_LOCKS.get(lock)
 
     def exit_kind(self, line: Line) -> str | None:
         table = DOOM_EXITS if self.format == "Doom" else HEXEN_EXITS
@@ -251,8 +279,8 @@ def _parse_binary(name: str, data: dict[str, bytes], hexen: bool) -> MapData:
         return -1 if i == 0xFFFF else i
 
     if hexen:  # v1, v2, flags, special(byte), 5 args, front, back
-        for v1, v2, _f, special, *_args, front, back in struct.iter_unpack("<HHHB5BHH", ld[:len(ld) // 16 * 16]):
-            m.lines.append(Line(v1, v2, special, back != 0xFFFF, side(front), side(back)))
+        for v1, v2, _f, special, *args, front, back in struct.iter_unpack("<HHHB5BHH", ld[:len(ld) // 16 * 16]):
+            m.lines.append(Line(v1, v2, special, back != 0xFFFF, side(front), side(back), tuple(args)))
     else:  # v1, v2, flags, special, tag, front, back
         for v1, v2, _f, special, _tag, front, back in struct.iter_unpack("<HHHHHHH", ld[:len(ld) // 14 * 14]):
             m.lines.append(Line(v1, v2, special, back != 0xFFFF, side(front), side(back)))
@@ -309,8 +337,9 @@ def _parse_udmf(name: str, text: bytes) -> MapData:
             m.vertices.append((float(f.get("x", 0)), float(f.get("y", 0))))
         elif kind == "linedef":
             front, back = int(f.get("sidefront", -1)), int(f.get("sideback", -1))
+            args = tuple(int(f.get(f"arg{i}", 0)) for i in range(5))
             m.lines.append(Line(int(f.get("v1", 0)), int(f.get("v2", 0)), int(f.get("special", 0)),
-                                back != -1, front, back))
+                                back != -1, front, back, args, int(f.get("locknumber", 0))))
         elif kind == "sidedef":
             m.sidedefs += 1
             m.side_sectors.append(int(f.get("sector", -1)))
@@ -372,6 +401,16 @@ def wad_totals(wads: list[WadFile]) -> tuple[dict[str, int], tuple[str, int] | N
 
 # ------------------------------------------------------------------ statistics
 
+def _key_line_summary(m: MapData) -> str:
+    counts = {c: 0 for c in KEY_COLOURS}
+    for line in m.lines:
+        colour = m.key_colour(line)
+        if colour:
+            counts[colour] += 1
+    parts = [f"{n} {c}" for c, n in counts.items() if n]
+    return ", ".join(parts) if parts else "None"
+
+
 def map_stats(m: MapData) -> list[tuple[str, str]]:
     """Human-readable (label, value) rows for the Maps tab."""
     uv_single = [t for t in m.things if t.uv and t.single]
@@ -408,6 +447,7 @@ def map_stats(m: MapData) -> list[tuple[str, str]]:
         ("Secrets", str(m.secret_sectors)),
         ("Exit linedef", exit_text),
         ("Secret exit", "Yes" if "secret" in exits else "No"),
+        ("Key-locked lines", _key_line_summary(m)),
         ("Keys", ", ".join(keys) if keys else "None"),
         ("Weapons (UV)", ", ".join(weapons) if weapons else "None"),
         ("Player starts", f"{sum(1 for t in m.things if t.type in PLAYER_STARTS)} co-op, "

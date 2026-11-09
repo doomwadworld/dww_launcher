@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "dww-launcher"
 version = "0.1.0"
-description = "Doom WAD World Launcher - launch classic Doom with any source port, IWAD and mods; record and package demos."
+description = "DOOM WAD World Launcher - launch classic Doom with any source port, IWAD and mods; record and package demos."
 readme = "readme.md"
 requires-python = ">=3.10"
 dependencies = [
