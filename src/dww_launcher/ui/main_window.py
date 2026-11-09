@@ -6,8 +6,8 @@ import html
 from datetime import datetime, timezone
 from pathlib import Path
 
-from PySide6.QtCore import QProcess, QRegularExpression, Qt, QTimer, Signal
-from PySide6.QtGui import QAction, QFontDatabase, QRegularExpressionValidator
+from PySide6.QtCore import QProcess, QRect, QRegularExpression, Qt, QTimer, Signal
+from PySide6.QtGui import QAction, QFontDatabase, QPalette, QRegularExpressionValidator
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -32,6 +32,9 @@ from PySide6.QtWidgets import (
     QPushButton,
     QSizePolicy,
     QSplitter,
+    QStyle,
+    QStyledItemDelegate,
+    QStyleOptionViewItem,
     QTabWidget,
     QToolButton,
     QVBoxLayout,
@@ -111,6 +114,33 @@ MIN_BROWSER_WIDTH = 320
 ENTRY_PLACEHOLDER = "e.g. 12493, https://www.doomworld.com/idgames/levels/doom2/a-c/zzsketch, levels/doom/Ports/a-c/foo"
 
 
+class _ModItemDelegate(QStyledItemDelegate):
+    """Draws a mod's folder, dimmed, to the right of its name."""
+
+    def paint(self, painter, option, index):
+        super().paint(painter, option, index)
+        path = index.data(Qt.ItemDataRole.UserRole)
+        if not path:
+            return
+        opt = QStyleOptionViewItem(option)
+        self.initStyleOption(opt, index)
+        style = opt.widget.style() if opt.widget else QApplication.style()
+        text_rect = style.subElementRect(QStyle.SubElement.SE_ItemViewItemText, opt, opt.widget)
+        x = text_rect.left() + opt.fontMetrics.horizontalAdvance(opt.text) + 18
+        area = QRect(x, text_rect.top(), text_rect.right() - x, text_rect.height())
+        if area.width() < 40:
+            return
+        selected = bool(opt.state & QStyle.StateFlag.State_Selected)
+        color = opt.palette.color(QPalette.ColorRole.HighlightedText if selected else QPalette.ColorRole.Text)
+        color.setAlpha(150 if selected else 120)
+        painter.save()
+        painter.setPen(color)
+        folder = str(Path(path).parent)
+        painter.drawText(area, Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
+                         opt.fontMetrics.elidedText(folder, Qt.TextElideMode.ElideMiddle, area.width()))
+        painter.restore()
+
+
 class PwadList(QListWidget):
     """List of mod files that accepts drag-and-drop from the file manager."""
 
@@ -122,6 +152,8 @@ class PwadList(QListWidget):
         self.setAcceptDrops(True)
         self.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
         self.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.setItemDelegate(_ModItemDelegate(self))
+        self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.model().rowsMoved.connect(lambda *_: self.changed.emit())
 
     def paths(self) -> list[str]:
@@ -183,7 +215,7 @@ class MainWindow(QMainWindow):
         self._name_manual = False  # user typed their own demo name
         self._setting_complevel = False
 
-        self.setWindowTitle("Doom WAD World Launcher")
+        self.setWindowTitle("DOOM WAD World Launcher")
         self.resize(860, 940)
         self._build_ui()
         self._restore_state()
@@ -214,6 +246,7 @@ class MainWindow(QMainWindow):
         self.pwad_list.setMinimumHeight(110)
         self.pwad_list.changed.connect(self._refresh)
         self.pwad_list.added.connect(self._on_pwads_added)
+        self.pwad_list.customContextMenuRequested.connect(self._mods_context_menu)
         pwad_buttons = QVBoxLayout()
         for text, slot in (("Add…", self._add_pwads), ("Remove", self._remove_pwads),
                            ("Up", lambda: self._move_pwad(-1)), ("Down", lambda: self._move_pwad(1)),
@@ -233,7 +266,13 @@ class MainWindow(QMainWindow):
         oform = QFormLayout(options)
 
         self.map_combo = QComboBox()
-        oform.addRow("Map:", self.map_combo)
+        self.mod_maps_check = QCheckBox("Mod maps only")
+        self.mod_maps_check.setToolTip("List only the levels that the loaded mods add or replace")
+        self.mod_maps_check.toggled.connect(self._refresh)
+        map_row = QHBoxLayout()
+        map_row.addWidget(self.map_combo, 1)
+        map_row.addWidget(self.mod_maps_check)
+        oform.addRow("Map:", map_row)
 
         self.skill_combo = QComboBox()
         self.skill_combo.addItem("(default)", None)
@@ -555,6 +594,7 @@ class MainWindow(QMainWindow):
         self.pwad_list.add_paths(s.last_pwads)
         self.file_browser.restore_state(s.file_browser_state)
         self.file_browser.set_layers(s.map_layers)
+        self.mod_maps_check.setChecked(s.mod_maps_only)
         if s.file_browser_visible:
             self.browser_action.setChecked(True)
 
@@ -575,6 +615,8 @@ class MainWindow(QMainWindow):
         s.file_browser_visible = self.browser_dock.isVisibleTo(self) if self.isVisible() \
             else self.browser_action.isChecked()
         self._remember_browser_width()
+        s.mod_maps_only = self.mod_maps_check.isChecked()
+        s.file_browser_floating = self.browser_dock.isFloating()
         s.file_browser_state = self.file_browser.save_state()
         s.map_layers = self.file_browser.layers()
         try:
@@ -653,8 +695,11 @@ class MainWindow(QMainWindow):
         self.map_combo.blockSignals(True)
         self.map_combo.clear()
         self.map_combo.addItem("(start normally)", None)
+        mod_only = self.mod_maps_check.isChecked()
         for m in sorted(sources, key=map_sort_key):
             src = sources[m]
+            if src is None and mod_only:
+                continue
             if src is None:
                 label = m
             elif m in iwad_maps:
@@ -832,6 +877,50 @@ class MainWindow(QMainWindow):
     def _clear_pwads(self) -> None:
         self.pwad_list.clear()
         self._refresh()
+
+    def mods_context_actions(self, paths: list[str]) -> list[QAction]:
+        """Right-click actions for the selected mods (also used by tests)."""
+        actions = []
+        if len(paths) == 1:
+            path = paths[0]
+            a = QAction("Show in File Browser", self)
+            a.triggered.connect(lambda: self.reveal_in_browser(path))
+            actions.append(a)
+            a = QAction("Open Containing Folder", self)
+            a.triggered.connect(lambda: self._open_folder(str(Path(path).parent)))
+            actions.append(a)
+        if paths:
+            a = QAction("Copy Path" if len(paths) == 1 else "Copy Paths", self)
+            a.triggered.connect(lambda: QApplication.clipboard().setText("\n".join(paths)))
+            actions.append(a)
+            a = QAction("Remove" if len(paths) == 1 else f"Remove ({len(paths)})", self)
+            a.triggered.connect(self._remove_pwads)
+            actions.append(a)
+        return actions
+
+    def _mods_context_menu(self, pos) -> None:
+        item = self.pwad_list.itemAt(pos)
+        if item is not None and not item.isSelected():
+            self.pwad_list.clearSelection()
+            item.setSelected(True)
+        paths = [i.data(Qt.ItemDataRole.UserRole) for i in self.pwad_list.selectedItems()]
+        actions = self.mods_context_actions(paths)
+        if not actions:
+            return
+        menu = QMenu(self)
+        for a in actions:
+            if a.text().startswith("Copy"):
+                menu.addSeparator()
+            menu.addAction(a)
+        menu.exec(self.pwad_list.viewport().mapToGlobal(pos))
+
+    def reveal_in_browser(self, path: str) -> None:
+        """Open the file browser at a file's folder with the file selected."""
+        self.set_file_browser_visible(True)
+        self.file_browser.reveal(path)
+        if self.browser_dock.isFloating():
+            self.browser_dock.raise_()
+            self.browser_dock.activateWindow()
 
     def _move_pwad(self, delta: int) -> None:
         row = self.pwad_list.currentRow()
@@ -1124,6 +1213,7 @@ class MainWindow(QMainWindow):
             iwad=self.iwad_combo.currentData() or "",
             pwads=self.pwad_list.paths(),
             map=self.map_combo.currentData(),
+            mod_maps_only=self.mod_maps_check.isChecked(),
             skill=self.skill_combo.currentData(),
             complevel=self.complevel_combo.currentData(),
             fast=self.fast_check.isChecked(),
@@ -1163,6 +1253,9 @@ class MainWindow(QMainWindow):
 
         self.pwad_list.clear()
         self.pwad_list.add_paths(p.pwads)  # may auto-select a map / complevel; overridden below
+        self.mod_maps_check.blockSignals(True)
+        self.mod_maps_check.setChecked(p.mod_maps_only)
+        self.mod_maps_check.blockSignals(False)
         self._refresh()
         self._select_data(self.map_combo, p.map)
         if p.map is None:
@@ -1258,7 +1351,7 @@ class MainWindow(QMainWindow):
 
     def _set_current_profile(self, name: str | None) -> None:
         self.current_profile = name
-        self.setWindowTitle("Doom WAD World Launcher" + (f" - {name}" if name else ""))
+        self.setWindowTitle("DOOM WAD World Launcher" + (f" - {name}" if name else ""))
 
     # ---------------------------------------------------------- file browser
     def _build_file_browser(self) -> None:
@@ -1270,8 +1363,12 @@ class MainWindow(QMainWindow):
         self.browser_dock.setObjectName("FileBrowserDock")
         self.browser_dock.setWidget(self.file_browser)
         self.browser_dock.setAllowedAreas(Qt.DockWidgetArea.RightDockWidgetArea)
-        self.browser_dock.setFeatures(QDockWidget.DockWidgetFeature.DockWidgetClosable)
+        self.browser_dock.setFeatures(QDockWidget.DockWidgetFeature.DockWidgetClosable
+                                      | QDockWidget.DockWidgetFeature.DockWidgetFloatable
+                                      | QDockWidget.DockWidgetFeature.DockWidgetMovable)
         self.browser_dock.closed.connect(lambda: self.browser_action.setChecked(False))
+        self.browser_dock.topLevelChanged.connect(self._on_browser_floating_changed)
+        self.file_browser.detach_requested.connect(self.toggle_browser_detached)
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.browser_dock)
         self.browser_dock.hide()
 
@@ -1300,43 +1397,112 @@ class MainWindow(QMainWindow):
             return
         if visible == self.browser_dock.isVisibleTo(self):
             return
-        resize = not (self.isMaximized() or self.isFullScreen())
         if visible:
             if not self.file_browser.directory:
                 start = self.settings.file_browser_dir or self.demo_dir_edit.text()
                 if not self.file_browser.set_directory(start):
                     self.file_browser.set_directory(Path.home())
-            panel = max(int(self.settings.file_browser_width or BROWSER_WIDTH), MIN_BROWSER_WIDTH)
-            self._width_before_browser = self.width() if resize else None
-            self._width_with_browser = None
-            if resize:
-                screen = self.screen().availableGeometry()
-                frame = self.frameGeometry().width() - self.width()
-                width = max(self.width(), min(self.width() + panel, screen.width() - frame))
-                x = max(screen.left(), min(self.x(), screen.right() + 1 - width - frame))
-                self.resize(width, self.height())
-                if x != self.x():
-                    self.move(x, self.y())
-            self.browser_dock.show()
-            self.resizeDocks([self.browser_dock], [panel], Qt.Orientation.Horizontal)
-            # Qt may widen the window further to fit the dock; note the final width once laid out.
-            QTimer.singleShot(0, self._note_browser_width)
+            if self.settings.file_browser_floating:
+                self._show_browser_floating()
+            else:
+                self._grow_for_browser()
+                self.browser_dock.show()
+                self._fit_docked_browser()
         else:
-            before = getattr(self, "_width_before_browser", None)
-            after = getattr(self, "_width_with_browser", None) or self.width()
             self._remember_browser_width()
             self.browser_dock.hide()
-            if resize and before is not None:
-                # Back to the original width, keeping any resizing the user did meanwhile. Deferred
-                # until the layout has dropped the hidden dock's minimum width.
-                target = before + self.width() - after
-                QTimer.singleShot(0, lambda: self.resize(max(target, self.minimumSizeHint().width()),
-                                                         self.height()))
-            self._width_before_browser = None
+            self._shrink_after_browser()
+
+    def _browser_panel_width(self) -> int:
+        return max(int(self.settings.file_browser_width or BROWSER_WIDTH), MIN_BROWSER_WIDTH)
+
+    def _grow_for_browser(self) -> None:
+        """Widen the window to make room for the docked panel."""
+        self._width_before_browser = None
+        self._width_with_browser = None
+        if self.isMaximized() or self.isFullScreen():
+            return
+        self._width_before_browser = self.width()
+        screen = self.screen().availableGeometry()
+        frame = self.frameGeometry().width() - self.width()
+        width = max(self.width(), min(self.width() + self._browser_panel_width(), screen.width() - frame))
+        x = max(screen.left(), min(self.x(), screen.right() + 1 - width - frame))
+        self.resize(width, self.height())
+        if x != self.x():
+            self.move(x, self.y())
+
+    def _fit_docked_browser(self) -> None:
+        self.resizeDocks([self.browser_dock], [self._browser_panel_width()], Qt.Orientation.Horizontal)
+        # Qt may widen the window further to fit the dock; note the final width once laid out.
+        QTimer.singleShot(0, self._note_browser_width)
+
+    def _shrink_after_browser(self) -> None:
+        """Give back the width the docked panel took, keeping any resizing done meanwhile."""
+        before = getattr(self, "_width_before_browser", None)
+        self._width_before_browser = None
+        if before is None or self.isMaximized() or self.isFullScreen():
+            return
+        after = getattr(self, "_width_with_browser", None) or self.width()
+        target = before + self.width() - after
+        # Deferred until the layout has dropped the dock's minimum width.
+        QTimer.singleShot(0, lambda: self.resize(max(target, self.minimumSizeHint().width()), self.height()))
+
+    def _show_browser_floating(self) -> None:
+        self.browser_dock.setFloating(True)
+        geo = self.settings.file_browser_float_geometry
+        saved = isinstance(geo, list) and len(geo) == 4 and geo[2] > 100 and geo[3] > 100
+        if saved:
+            self.browser_dock.setGeometry(self._on_screen(QRect(*geo)))
+        else:
+            self.browser_dock.resize(self._browser_panel_width(), max(self.height(), 600))
+        self.browser_dock.show()
+        if not saved:  # beside the main window, once it has given back the panel's width
+            QTimer.singleShot(0, self._place_floating_browser)
+
+    def _place_floating_browser(self) -> None:
+        rect = QRect(self.frameGeometry().right() + 8, self.y(), self.browser_dock.width(), self.browser_dock.height())
+        self.browser_dock.setGeometry(self._on_screen(rect))
+
+    def _on_screen(self, rect: QRect) -> QRect:
+        """``rect`` moved (and if need be shrunk) to fit on the screen showing the main window."""
+        screen = self.screen().availableGeometry()
+        w, h = min(rect.width(), screen.width()), min(rect.height(), screen.height())
+        x = min(max(rect.x(), screen.left()), screen.right() + 1 - w)
+        y = min(max(rect.y(), screen.top()), screen.bottom() + 1 - h)
+        return QRect(x, y, w, h)
+
+    def toggle_browser_detached(self) -> None:
+        """Move the file browser between the main window and a window of its own."""
+        if not self.browser_dock.isVisible():
+            self.settings.file_browser_floating = not self.settings.file_browser_floating
+            self.browser_action.setChecked(True)
+            return
+        if self.browser_dock.isFloating():
+            self.browser_dock.setFloating(False)
+        else:
+            self._remember_browser_width()
+            self.browser_dock.setFloating(True)
+            self._show_browser_floating()
+
+    def _on_browser_floating_changed(self, floating: bool) -> None:
+        self.file_browser.set_detached(floating)
+        if not self.browser_dock.isVisible():
+            return
+        self.settings.file_browser_floating = floating
+        if floating:  # the main window no longer needs room for the panel
+            self._shrink_after_browser()
+        else:  # docked again (button or dragged back): make room
+            self._grow_for_browser()
+            self._fit_docked_browser()
 
     def _remember_browser_width(self) -> None:
-        """Store the panel's current width so it reopens at the same size."""
-        if self.browser_dock.isVisible() and self.browser_dock.width() >= MIN_BROWSER_WIDTH:
+        """Store the panel's size (docked width, or detached window geometry) for next time."""
+        if not self.browser_dock.isVisible():
+            return
+        if self.browser_dock.isFloating():
+            g = self.browser_dock.geometry()
+            self.settings.file_browser_float_geometry = [g.x(), g.y(), g.width(), g.height()]
+        elif self.browser_dock.width() >= MIN_BROWSER_WIDTH:
             self.settings.file_browser_width = self.browser_dock.width()
 
     def _note_browser_width(self) -> None:
@@ -1391,7 +1557,7 @@ class AboutDialog(QDialog):
         top.addWidget(icon, 0, Qt.AlignmentFlag.AlignTop)
         links = [("YouTube", YOUTUBE_URL), ("Discord", DISCORD_URL), ("GitHub", GITHUB_URL)]
         self.text = QLabel(
-            f"<h3>Doom WAD World Launcher</h3><p>Version {html.escape(__version__)}</p>"
+            f"<h3>DOOM WAD World Launcher</h3><p>Version {html.escape(__version__)}</p>"
             + "".join(f'<p>{label}: <a href="{url}">{html.escape(url)}</a></p>' for label, url in links)
         )
         self.text.setTextFormat(Qt.TextFormat.RichText)

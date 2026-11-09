@@ -19,7 +19,9 @@ from PySide6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QMenu,
+    QPushButton,
     QSplitter,
+    QStackedWidget,
     QTableWidget,
     QTableWidgetItem,
     QTabWidget,
@@ -108,6 +110,7 @@ class FileBrowser(QWidget):
     play_demo = Signal(str)
     directory_changed = Signal(str)
     layers_changed = Signal(dict)
+    detach_requested = Signal()
 
     def __init__(self, places=None, sprite_iwads=None, parent=None):
         super().__init__(parent)
@@ -152,7 +155,10 @@ class FileBrowser(QWidget):
         refresh.setText("⟳")
         refresh.setToolTip("Refresh")
         refresh.clicked.connect(self.refresh)
-        for w in (self.up_button, self.path_edit, browse, self.places_button, refresh):
+        self.detach_button = QToolButton()
+        self.detach_button.clicked.connect(self.detach_requested)
+        self.set_detached(False)
+        for w in (self.up_button, self.path_edit, browse, self.places_button, refresh, self.detach_button):
             bar.addWidget(w, 1 if w is self.path_edit else 0)
         layout.addLayout(bar)
 
@@ -190,7 +196,7 @@ class FileBrowser(QWidget):
         # Detail / Maps tabs
         self.tabs = QTabWidget()
         self.detail_tree = _property_tree()
-        self.tabs.addTab(self.detail_tree, "Detail")
+        self.tabs.addTab(self.detail_tree, "Details")
 
         self.viewer = MapViewer()
         self.viewer.layers_changed.connect(self._on_layers_changed)
@@ -206,7 +212,22 @@ class FileBrowser(QWidget):
         right.setStretchFactor(1, 2)
         right.setChildrenCollapsible(False)
         self.maps_split = QSplitter(Qt.Orientation.Horizontal)
-        self.maps_split.addWidget(self.viewer)
+        # The docked preview is swapped for a note while the map is popped out into its own window.
+        self.viewer_stack = QStackedWidget()
+        self.viewer_stack.addWidget(self.viewer)
+        note = QWidget()
+        note_layout = QVBoxLayout(note)
+        note_layout.addStretch()
+        note_label = QLabel("The map preview is open in its own window.")
+        note_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        note_label.setWordWrap(True)
+        note_layout.addWidget(note_label)
+        self.bring_back_button = QPushButton("Bring it back")
+        self.bring_back_button.clicked.connect(self.close_map_window)
+        note_layout.addWidget(self.bring_back_button, 0, Qt.AlignmentFlag.AlignHCenter)
+        note_layout.addStretch()
+        self.viewer_stack.addWidget(note)
+        self.maps_split.addWidget(self.viewer_stack)
         self.maps_split.addWidget(right)
         self.maps_split.setStretchFactor(0, 11)  # preview gets the larger share
         self.maps_split.setStretchFactor(1, 9)
@@ -238,6 +259,25 @@ class FileBrowser(QWidget):
         self.up_button.setEnabled(Path(self.directory).parent != Path(self.directory))
         self.refresh()
         self.directory_changed.emit(self.directory)
+        return True
+
+    def set_detached(self, detached: bool) -> None:
+        self.detach_button.setText("⇤ Attach" if detached else "⧉ Detach")
+        self.detach_button.setToolTip("Put the file browser back into the main window" if detached
+                                      else "Move the file browser into its own window")
+
+    def reveal(self, path: str | Path) -> bool:
+        """Show a file's folder with the file selected."""
+        path = Path(path)
+        folder = str(path.parent.resolve())
+        if self.directory != folder and not self.set_directory(folder):
+            return False
+        item = self._rows.get(str(path)) or self._rows.get(str(path.resolve()))
+        if item is None:
+            return False
+        self.table.clearSelection()
+        self.table.selectRow(item.row())
+        self.table.scrollToItem(item)
         return True
 
     def go_up(self) -> None:
@@ -437,7 +477,9 @@ class FileBrowser(QWidget):
         self.map_list.blockSignals(False)
         self.map_list.setVisible(len(maps) > 1)
         if maps:
+            self.map_list.blockSignals(True)
             self.map_list.setCurrentRow(0)
+            self.map_list.blockSignals(False)
             self._on_map_selected(self.map_list.item(0), None)
         else:
             self._show_map(None, "", "No levels")
@@ -456,6 +498,7 @@ class FileBrowser(QWidget):
         title = item.text().split("   ", 1)[1] if "   " in item.text() else ""
         self._current_sprites = self.sprites_for(self._detail_path)
         self._show_map(m, f"{Path(self._detail_path).name} - {name}" + (f" {title}" if title else ""))
+        self._sync_window_maps()
         bold = self.map_stats.font()
         bold.setBold(True)
         title = QTreeWidgetItem([name, item.text().split("   ", 1)[1] if "   " in item.text() else ""])
@@ -497,9 +540,21 @@ class FileBrowser(QWidget):
         self._current_map, self._current_map_title = m, title
         self._map_message = message or "No levels"
         sprites = self._current_sprites if m is not None else None
-        self.viewer.set_map(m, message, sprites)
-        if self.map_window is not None:
+        if self.map_window is not None:  # only the popped-out window draws the map
             self.map_window.show_map(m, title, message, sprites)
+            if m is None:
+                self.map_window.set_maps([], -1)
+        else:
+            self.viewer.set_map(m, message, sprites)
+
+    def _sync_window_maps(self) -> None:
+        if self.map_window is not None:
+            labels = [self.map_list.item(i).text() for i in range(self.map_list.count())]
+            self.map_window.set_maps(labels, self.map_list.currentRow())
+
+    def _on_window_map_chosen(self, row: int) -> None:
+        if row != self.map_list.currentRow():
+            self.map_list.setCurrentRow(row)
 
     def pop_out_map(self) -> None:
         """Show the current map in its own resizable window (kept in sync with the selection)."""
@@ -507,16 +562,23 @@ class FileBrowser(QWidget):
             self.map_window = MapWindow(self.window())
             self.map_window.viewer.layers_changed.connect(self._on_layers_changed)
             self.map_window.closed.connect(self._on_map_window_closed)
+            self.map_window.map_chosen.connect(self._on_window_map_chosen)
         self.map_window.viewer.set_layers(self.viewer.layers())
         self.map_window.show_map(self._current_map, self._current_map_title,
                                  "" if self._current_map else self._map_message,
                                  self._current_sprites if self._current_map else None)
+        self._sync_window_maps()
+        self.viewer_stack.setCurrentIndex(1)
+        self.viewer.set_map(None)  # stop drawing the docked copy
         self.map_window.show()
         self.map_window.raise_()
         self.map_window.activateWindow()
 
     def _on_map_window_closed(self) -> None:
         self.map_window = None
+        self.viewer_stack.setCurrentIndex(0)
+        sprites = self._current_sprites if self._current_map is not None else None
+        self.viewer.set_map(self._current_map, "" if self._current_map else self._map_message, sprites)
 
     def _on_layers_changed(self, layers: dict) -> None:
         for viewer in (self.viewer, self.map_window.viewer if self.map_window else None):

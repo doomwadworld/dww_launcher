@@ -1,6 +1,6 @@
 # DWW Launcher
 
-**Doom WAD World Launcher** is a cross-platform (Windows, macOS, Linux) GUI for launching
+**DOOM WAD World Launcher** is a cross-platform (Windows, macOS, Linux) GUI for launching
 classic Doom engine games with any source port, IWAD and set of mods, and for recording,
 playing back and packaging demos.
 
@@ -10,9 +10,11 @@ playing back and packaging demos.
 
 - Keep a list of source ports and IWADs. macOS `.app` bundles are supported.
 - IWAD detection: Doom, Ultimate Doom, Doom II, Final Doom (TNT/Plutonia), Freedoom.
-- Mod list with drag-and-drop and load ordering. It shows how many levels each WAD contains.
+- Mod list with drag-and-drop and load ordering. It shows how many levels each WAD contains and
+  the folder it's in. Right-click a mod to show it in the file browser, open its folder in the
+  system file manager, copy its path or remove it.
   `.deh`/`.bex` files go to `-deh`, everything else to `-file`.
-- Map picker built from the IWAD and mods. Maps a mod replaces or adds are labelled, and adding
+- Map picker built from the IWAD and mods (tick **Mod maps only** to list just the mods' levels). Maps a mod replaces or adds are labelled, and adding
   a mod selects its first level.
 - Skill, `-complevel` (0-4, 9, 11, 21), `-fast` / `-respawn` / `-nomonsters` / `-tas` / `-dsdademo`,
   and free-form extra arguments.
@@ -38,6 +40,8 @@ playing back and packaging demos.
 ### File browser
 
 **File Browser ▸** on the right of the toolbar (or **Ctrl+B**) slides out a panel on the right.
+**⧉ Detach** moves it into a window of its own (**⇤ Attach** puts it back); it reopens the way
+you left it.
 
 - **File table** of `.wad`, `.pwd`, `.pk3`, `.lmp`, `.deh` and `.bex` files (any letter case) and
   folders. Columns: type, number of levels (or a demo's starting map and skill), game or IWAD,
@@ -45,7 +49,7 @@ playing back and packaging demos.
 - **Double-click:** a PWAD/PK3/DEH is added to the mods list, an IWAD becomes the IWAD, a demo is
   played with the current settings, and a folder is opened. Right-click for the same actions on
   several files at once, plus Copy Path.
-- **Detail tab:** file properties (size, dates, permissions) plus Doom details:
+- **Details tab:** file properties (size, dates, permissions) plus Doom details:
   - WADs: type, game, lumps, levels, map formats, sprite/flat/patch/music/sound counts, and
     notable lumps such as DEHACKED, UMAPINFO, MAPINFO, DECORATE and ZSCRIPT.
   - Level totals for WADs and PK3s with maps: things, monsters on UV, secrets, linedefs,
@@ -67,6 +71,8 @@ playing back and packaging demos.
     counts, and every category and type can be switched on or off. Settings carry over to other
     maps; **Defaults** restores the starting set. Things shown are those present on
     Ultra-Violence in single player; keys are always included.
+  - **Key doors** draws doors and switches that need a key in that key's colour (Doom, Boom
+    generalised, Hexen-format and UDMF locks).
   - **Secrets** fills secret sectors in purple; **Exits** highlights exit lines (orange) and
     secret exit lines (violet).
   - The in-map legend lists the exits. **Click it** to glide to the exit line, which is briefly
@@ -79,7 +85,9 @@ playing back and packaging demos.
   - **Hover** over a thing to highlight it and see a tooltip with its name, category and type
     number, the skill levels it appears on, ambush/multiplayer-only flags, its position and
     which way it faces. Things stacked on the same spot are listed together.
-  - **⧉ Pop out** opens the preview in its own resizable window that follows the selected map.
+  - **⧉ Pop out** opens the preview in its own resizable window, with its own list of the file's
+    maps (kept in step with the panel). While it's open the panel shows a note instead of a
+    second copy of the map; closing the window brings the docked preview back.
 - The panel remembers its width, internal layout, column widths and layer toggles.
 
 ### Demo Submission tab
