@@ -14,7 +14,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 pytest.importorskip("PySide6")
 
 from PySide6.QtCore import QEventLoop, Qt, QTimer  # noqa: E402
-from PySide6.QtWidgets import QApplication, QFileDialog, QInputDialog, QMessageBox  # noqa: E402
+from PySide6.QtWidgets import QApplication, QDialog, QFileDialog, QInputDialog, QLabel, QMessageBox  # noqa: E402
 
 from dww_launcher.config import Settings  # noqa: E402
 from dww_launcher.ui.main_window import MainWindow  # noqa: E402
@@ -50,6 +50,12 @@ def isolated_windows(qapp, monkeypatch, tmp_path):
     Closing a window saves settings, so the save patch must outlive the close.
     """
     monkeypatch.setattr(Settings, "save", lambda self, path=None: None)
+
+    def unexpected_dialog(self):
+        raise AssertionError("unexpected missing-demo-files warning")
+
+    # A modal dialog would hang a headless test run; tests that expect it patch exec themselves.
+    monkeypatch.setattr("dww_launcher.ui.main_window.MissingDemoFilesDialog.exec", unexpected_dialog)
     monkeypatch.setattr("dww_launcher.ui.main_window.sheets_dir", lambda: tmp_path / "sheets")
     monkeypatch.setattr("dww_launcher.ui.main_window.profiles_dir", lambda: tmp_path / "profiles")
     opened = []
@@ -304,7 +310,8 @@ def test_create_text_and_zip(qapp, sheet_window, tmp_path, monkeypatch, no_dialo
     w.comments_edit.setPlainText("UV max.\nNo saves.")
 
     w._create_text_file()
-    assert (demo_dir / "zzsketch.txt").read_text() == "12493\nHoF\nGreat layouts\nUV max.\nNo saves.\n"
+    assert (demo_dir / "zzsketch.txt").read_text() == \
+        "Entry: 12493\nHoF/HoS: HoF\nWhy: Great layouts\nComments: UV max.\nNo saves.\n"
 
     demos = []
     for i in (1, 2):
@@ -319,7 +326,7 @@ def test_create_text_and_zip(qapp, sheet_window, tmp_path, monkeypatch, no_dialo
     assert seen == [str(demo_dir / "zzsketch.zip")]
     with zipfile.ZipFile(demo_dir / "zzsketch.zip") as zf:
         assert sorted(zf.namelist()) == ["zzsketch.txt", "zzsketch_1.lmp", "zzsketch_2.lmp"]
-        assert zf.read("zzsketch.txt").decode().startswith("12493\nHoF\nGreat layouts\n")
+        assert zf.read("zzsketch.txt").decode().startswith("Entry: 12493\nHoF/HoS: HoF\nWhy: Great layouts\n")
 
 
 def test_package_button_moved(qapp, sheet_window):
@@ -501,7 +508,7 @@ def test_txt_dir_follows_demo_dir(qapp, sheet_window, tmp_path, monkeypatch, no_
 
     w.entry_edit.setText("12000")
     w._create_text_file()
-    assert (other / "fresh.txt").read_text().startswith("12000\nN/A\n")
+    assert (other / "fresh.txt").read_text().startswith("Entry: 12000\nHoF/HoS: N/A\n")
     assert w.settings.txt_dir == str(other) and not w.settings.txt_dir_same_as_demo
 
     new_demo = tmp_path / "newdemos"
@@ -786,6 +793,9 @@ def test_browser_actions_reach_launcher(qapp, browse_dir, tmp_path, monkeypatch,
     fb._on_double_click(fb.table.item(select(fb, "game.wad"), 0))
     assert w.iwad_combo.currentData() == str(browse_dir / "game.wad")
     assert str(browse_dir / "game.wad") not in w.pwad_list.paths()
+    # RUN.LMP was recorded with freedoom2.wad, which isn't loaded: the warning comes first.
+    monkeypatch.setattr("dww_launcher.ui.main_window.MissingDemoFilesDialog.exec",
+                        lambda self: QDialog.DialogCode.Accepted)
     fb._on_double_click(fb.table.item(select(fb, "RUN.LMP"), 0))
     assert started and started[0].playdemo == str(browse_dir / "RUN.LMP")
 
@@ -1372,3 +1382,140 @@ def test_detach_and_reattach_browser(qapp, browse_dir, tmp_path):
     qapp.processEvents()
     assert w2.browser_dock.isFloating() and w2.browser_dock.isVisible()
     w2.file_browser.stop()
+
+
+# ------------------------------------------------------- demo sections / notes / file check
+
+def test_demo_sections_split(qapp, tmp_path):
+    from PySide6.QtWidgets import QGroupBox
+
+    w = MainWindow(Settings(demo_dir=str(tmp_path), auto_download=False))
+    groups = {g.title(): g for g in w.findChildren(QGroupBox)}
+    assert "Demo" not in groups and {"Demo Recording", "Demo Playback"} <= set(groups)
+    playback, recording = groups["Demo Playback"], groups["Demo Recording"]
+    for widget in (w.timedemo_check, w.skipsec_edit):
+        assert playback.isAncestorOf(widget) and not recording.isAncestorOf(widget)
+    assert any(b.text() == "Play demo…" for b in playback.findChildren(type(w.launch_button)))
+    for widget in (w.record_check, w.record_name, w.sequence_check, w.keep_latest_check, w.demo_dir_edit):
+        assert recording.isAncestorOf(widget)
+
+
+def test_notes_for_dww(qapp, sheet_window, monkeypatch, no_dialogs):
+    w = sheet_window
+    assert w.notes_edit.placeholderText() == \
+        "Add notes for the YouTube channel owner. These will not be added to the description."
+    w.comments_edit.setPlainText("abc")
+    w.notes_edit.setPlainText("x" * 6000)  # not counted towards the limit
+    assert w.comments_counter.text() == "3/4500" and w.comments_warning.isHidden()
+    w.notes_edit.setPlainText("Please credit me as X")
+    w.entry_edit.setText("12493")
+    assert w._submission_text() == ("Entry: 12493\nHoF/HoS: N/A\nComments: abc\n"
+                                    "DWW Notes: Please credit me as X\n")
+    w._create_text_file()
+    assert (Path(w.txt_dir_edit.text()) / "zzsketch.txt").read_text().endswith("DWW Notes: Please credit me as X\n")
+
+
+@pytest.fixture
+def demo_window(qapp, tmp_path, wad_factory, monkeypatch):
+    """A launcher whose IWAD is named freedoom2.wad (in upper case, to check case-insensitivity)."""
+    iwad = wad_factory("FREEDOOM2.WAD", "IWAD", ["MAP01"])
+    port = tmp_path / "port"
+    port.write_text("")
+    w = MainWindow(Settings(ports=[str(port)], iwads=[str(iwad)], demo_dir=str(tmp_path), auto_download=False))
+    started = []
+    monkeypatch.setattr(w, "_start", lambda opts: started.append(opts.playdemo))
+    w.started = started
+    return w
+
+
+def footer_demo(tmp_path, name, cmdline):
+    from test_lmp import demo_with_cmdline
+
+    path = tmp_path / name
+    path.write_bytes(demo_with_cmdline(cmdline))
+    return str(path)
+
+
+def test_demo_with_all_files_plays_without_asking(demo_window, tmp_path):
+    w = demo_window
+    assert w.missing_demo_files(str(DEMO_DIR / "dsda_cl2_vanilla.lmp")) == []  # freedoom2.wad ~ FREEDOOM2.WAD
+    assert w.play_demo_file(str(DEMO_DIR / "dsda_cl2_vanilla.lmp"))
+    assert w.play_demo_file(str(DEMO_DIR / "freedoom2_DEMO1.lmp"))  # no footer: nothing to check
+    assert len(w.started) == 2
+
+
+def answer_dialog(monkeypatch, play: bool, never=False, session=False):
+    from dww_launcher.ui.main_window import MissingDemoFilesDialog
+
+    shown = []
+
+    def fake_exec(self):
+        shown.append(self.findChild(QLabel).text())
+        assert self.play_button.text() == "Play anyway" and self.cancel_button.text() == "Cancel"
+        self.never_check.setChecked(never)
+        self.session_check.setChecked(session)
+        return QDialog.DialogCode.Accepted if play else QDialog.DialogCode.Rejected
+
+    monkeypatch.setattr(MissingDemoFilesDialog, "exec", fake_exec)
+    return shown
+
+
+def test_missing_files_warning_play_and_cancel(demo_window, tmp_path, monkeypatch):
+    w = demo_window
+    demo = footer_demo(tmp_path, "run.lmp", '-iwad doom2.wad -file sunlust.wad -deh sunlust.deh')
+    assert w.missing_demo_files(demo) == ["doom2.wad", "sunlust.wad", "sunlust.deh"]
+
+    shown = answer_dialog(monkeypatch, play=False)
+    assert not w.play_demo_file(demo) and w.started == []
+    assert "sunlust.wad" in shown[0] and "run.lmp" in shown[0]
+
+    answer_dialog(monkeypatch, play=True)
+    assert w.play_demo_file(demo) and w.started == [demo]
+
+    # Loading the files makes the warning go away
+    for name in ("sunlust.wad", "SUNLUST.DEH"):
+        (tmp_path / name).write_bytes(b"PWAD\0\0\0\0\x0c\0\0\0")
+    w.pwad_list.add_paths([str(tmp_path / "sunlust.wad"), str(tmp_path / "SUNLUST.DEH")])
+    assert w.missing_demo_files(demo) == ["doom2.wad"]
+
+
+def test_missing_files_ignore_for_session(demo_window, tmp_path, monkeypatch):
+    w = demo_window
+    demo = footer_demo(tmp_path, "run.lmp", "-iwad doom2.wad")
+    shown = answer_dialog(monkeypatch, play=False, session=True)
+    assert not w.play_demo_file(demo)  # Cancel still cancels...
+    assert w.play_demo_file(demo) and len(shown) == 1  # ...but this session won't ask again
+    assert not w.settings.ignore_demo_file_warning and not w.ignore_demo_warning_action.isChecked()
+    w2 = MainWindow(w.settings)  # a new session asks again
+    assert not w2._ignore_demo_warning_session
+
+
+def test_missing_files_never_ask_again_and_options_toggle(demo_window, tmp_path, monkeypatch):
+    w = demo_window
+    demo = footer_demo(tmp_path, "run.lmp", "-iwad doom2.wad")
+    shown = answer_dialog(monkeypatch, play=True, never=True)
+    assert w.play_demo_file(demo)
+    assert w.settings.ignore_demo_file_warning and w.ignore_demo_warning_action.isChecked()
+    assert w.play_demo_file(demo) and len(shown) == 1
+    assert MainWindow(w.settings).ignore_demo_warning_action.isChecked()  # remembered
+
+    w.ignore_demo_warning_action.setChecked(False)  # turned back on from the Options menu
+    assert not w.settings.ignore_demo_file_warning
+    w.play_demo_file(demo)
+    assert len(shown) == 2
+
+
+def test_missing_files_dialog_contents(qapp):
+    from dww_launcher.ui.main_window import MissingDemoFilesDialog
+
+    d = MissingDemoFilesDialog("run.lmp", ["doom2.wad", "<odd>.wad"])
+    assert d.windowTitle() == "Demo files not loaded"
+    assert d.never_check.text() == "Never ask again" and d.session_check.text() == "Ignore for this session"
+    assert d.play_button.text() == "Play anyway" and d.cancel_button.text() == "Cancel"
+    assert "&lt;odd&gt;.wad" in d.findChild(QLabel).text()  # file names are escaped
+    d.show()
+    QApplication.processEvents()
+    assert d.cancel_button.isDefault() and not d.play_button.isDefault()
+    from PySide6.QtTest import QTest
+    QTest.keyClick(d, Qt.Key.Key_Return)  # Enter cancels
+    assert d.result() == QDialog.DialogCode.Rejected

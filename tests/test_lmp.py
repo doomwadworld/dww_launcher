@@ -82,3 +82,22 @@ def test_format_duration(seconds, text):
 def test_footer_garbage_is_ignored():
     d = parse_demo(vanilla(5, extra=b"PWAD" + struct.pack("<ii", 99, 9999)), "x.lmp")
     assert d.footer == {} and d.tics == 5
+
+
+def demo_with_cmdline(cmdline: str) -> bytes:
+    from conftest import build_wad
+
+    footer = build_wad("PWAD", [("PORTNAME", b"dsda-doom 0.27.5"), ("CMDLINE", cmdline.encode())])
+    return vanilla(3) + footer
+
+
+def test_required_files_from_footer():
+    d = read_demo(DATA / "dsda_cl2_vanilla.lmp")
+    assert d.required_files == ["freedoom2.wad"]
+    d = parse_demo(demo_with_cmdline('-iwad "/games/DOOM2.WAD" -file a.wad "/my wads/b.pk3" -deh fix.deh '
+                                     '-complevel 9 -skill 4'), "x.lmp")
+    assert d.required_files == ["DOOM2.WAD", "a.wad", "b.pk3", "fix.deh"]
+
+
+def test_no_footer_means_nothing_required():
+    assert read_demo(DATA / "freedoom2_DEMO1.lmp").required_files == []

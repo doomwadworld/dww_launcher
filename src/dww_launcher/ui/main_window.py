@@ -52,6 +52,7 @@ from dww_launcher.command import (
 from dww_launcher import __version__
 from dww_launcher.config import Settings
 from dww_launcher.desktop import open_folder, open_url, process_environment
+from dww_launcher.lmp import DemoError, read_demo
 from dww_launcher.demo import (
     auto_demo_name,
     consolidate_attempts,
@@ -203,6 +204,7 @@ class MainWindow(QMainWindow):
         self.current_profile: str | None = None
         self._sheet_data = load_sheets(self._sheet_dir)
         self._lookup = Lookup()
+        self._ignore_demo_warning_session = False
         self._auto_txt_name = ""
         self._manual_download = False
         self._downloader = SheetDownloader(urls=sheet_urls, parent=self)
@@ -310,8 +312,8 @@ class MainWindow(QMainWindow):
         oform.addRow("Extra args:", self.extra_edit)
         root.addWidget(options)
 
-        # Demo ---------------------------------------------------------------
-        demo = QGroupBox("Demo")
+        # Demo recording -----------------------------------------------------
+        demo = QGroupBox("Demo Recording")
         dform = QFormLayout(demo)
 
         self.record_check = QCheckBox("Record a demo")
@@ -340,6 +342,11 @@ class MainWindow(QMainWindow):
         dform.addRow("Demo folder:", self._with_buttons(
             self.demo_dir_edit, ("Change…", self._choose_demo_dir), ("Open", self._open_demo_dir)))
 
+        root.addWidget(demo)
+
+        # Demo playback ------------------------------------------------------
+        playback = QGroupBox("Demo Playback")
+        pform = QFormLayout(playback)
         play_row = QHBoxLayout()
         play = QPushButton("Play demo…")
         play.clicked.connect(self._play_demo)
@@ -348,7 +355,7 @@ class MainWindow(QMainWindow):
         play_row.addWidget(play)
         play_row.addWidget(self.timedemo_check)
         play_row.addStretch()
-        dform.addRow(play_row)
+        pform.addRow(play_row)
 
         self.skipsec_edit = QLineEdit()
         self.skipsec_edit.setPlaceholderText("seconds")
@@ -360,8 +367,8 @@ class MainWindow(QMainWindow):
         skip_row.addWidget(QLabel("Skip to:"))
         skip_row.addWidget(self.skipsec_edit)
         skip_row.addStretch()
-        dform.addRow(skip_row)
-        root.addWidget(demo)
+        pform.addRow(skip_row)
+        root.addWidget(playback)
 
         # Command preview + launch -------------------------------------------
         mono = QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont)
@@ -428,8 +435,13 @@ class MainWindow(QMainWindow):
         self.last_download_action.setEnabled(False)
         menu.addAction(self.auto_download_action)
         menu.addAction(self.redownload_action)
-        menu.addSeparator()
         menu.addAction(self.last_download_action)
+        menu.addSeparator()
+        self.ignore_demo_warning_action = QAction("Ignore Missing Demo Files Warning", self, checkable=True)
+        self.ignore_demo_warning_action.setToolTip(
+            "Don't warn before playing a demo that was recorded with files you haven't loaded")
+        self.ignore_demo_warning_action.toggled.connect(self._set_ignore_demo_warning)
+        menu.addAction(self.ignore_demo_warning_action)
         menu.setToolTipsVisible(True)
         self.options_button = QToolButton()
         self.options_button.setText("Options")
@@ -508,8 +520,20 @@ class MainWindow(QMainWindow):
         comments_layout.addWidget(self.comments_edit, 1)
         comments_layout.addLayout(self._counter_row(self.comments_warning, self.comments_counter))
         splitter.addWidget(comments)
-        splitter.setStretchFactor(0, 1)
-        splitter.setStretchFactor(1, 2)
+
+        notes = QGroupBox("Notes for DWW")
+        notes_layout = QVBoxLayout(notes)
+        self.notes_edit = QPlainTextEdit()
+        self.notes_edit.setPlaceholderText(
+            "Add notes for the YouTube channel owner. These will not be added to the description.")
+        self.notes_edit.setToolTip("Added to the end of the text file as \"DWW Notes: …\".\n"
+                                   "Not counted towards the description's character limit.")
+        notes_layout.addWidget(self.notes_edit, 1)
+        splitter.addWidget(notes)
+        splitter.setStretchFactor(0, 2)
+        splitter.setStretchFactor(1, 3)
+        splitter.setStretchFactor(2, 1)  # the smallest of the three
+        splitter.setSizes([200, 300, 90])
         layout.addWidget(splitter, 1)
 
         folder_row = QHBoxLayout()
@@ -595,6 +619,9 @@ class MainWindow(QMainWindow):
         self.file_browser.restore_state(s.file_browser_state)
         self.file_browser.set_layers(s.map_layers)
         self.mod_maps_check.setChecked(s.mod_maps_only)
+        self.ignore_demo_warning_action.blockSignals(True)
+        self.ignore_demo_warning_action.setChecked(s.ignore_demo_file_warning)
+        self.ignore_demo_warning_action.blockSignals(False)
         if s.file_browser_visible:
             self.browser_action.setChecked(True)
 
@@ -981,7 +1008,43 @@ class MainWindow(QMainWindow):
         path, _ = QFileDialog.getOpenFileName(
             self, "Play demo", self.demo_dir_edit.text(), DEMO_FILTER)
         if path:
-            self._start(self._current_options(playdemo=path))
+            self.play_demo_file(path)
+
+    def play_demo_file(self, path: str) -> bool:
+        """Play a demo, first warning if it was recorded with files that aren't loaded."""
+        if not self._confirm_demo_files(path):
+            return False
+        self._start(self._current_options(playdemo=path))
+        return True
+
+    def missing_demo_files(self, path: str) -> list[str]:
+        """Files named in the demo's footer (IWAD, -file, -deh) that aren't currently loaded."""
+        try:
+            required = read_demo(path).required_files
+        except DemoError:
+            return []
+        loaded = [self.iwad_combo.currentData() or "", *self.pwad_list.paths()]
+        names = {Path(p).name.lower() for p in loaded if p}
+        return [f for f in required if f.lower() not in names]
+
+    def _confirm_demo_files(self, path: str) -> bool:
+        if self.settings.ignore_demo_file_warning or self._ignore_demo_warning_session:
+            return True
+        missing = self.missing_demo_files(path)
+        if not missing:
+            return True
+        dialog = MissingDemoFilesDialog(Path(path).name, missing, self)
+        play = dialog.exec() == QDialog.DialogCode.Accepted
+        # The check boxes apply whichever button was pressed.
+        if dialog.never_check.isChecked():
+            self.ignore_demo_warning_action.setChecked(True)  # saves the setting
+        if dialog.session_check.isChecked():
+            self._ignore_demo_warning_session = True
+        return play
+
+    def _set_ignore_demo_warning(self, ignore: bool) -> None:
+        self.settings.ignore_demo_file_warning = ignore
+        self._save_state()
 
     def _start(self, opts: LaunchOptions) -> None:
         if self.process is not None:
@@ -1166,7 +1229,8 @@ class MainWindow(QMainWindow):
 
     def _submission_text(self) -> str:
         return submission_text(identifier_line(self.entry_edit.text(), self._lookup), self._hall(),
-                               self.why_edit.toPlainText(), self.comments_edit.toPlainText())
+                               self.why_edit.toPlainText(), self.comments_edit.toPlainText(),
+                               self.notes_edit.toPlainText())
 
     def _txt_name(self, fallback: str) -> str:
         return ensure_suffix(self.txt_name_edit.text().strip() or fallback, ".txt")
@@ -1526,7 +1590,7 @@ class MainWindow(QMainWindow):
         self._log(f"IWAD set to {Path(path).name}")
 
     def _browser_play_demo(self, path: str) -> None:
-        self._start(self._current_options(playdemo=path))
+        self.play_demo_file(path)
 
     # ----------------------------------------------------------------- about
     def show_about(self) -> None:
@@ -1544,6 +1608,39 @@ class _BrowserDock(QDockWidget):
     def closeEvent(self, event):
         super().closeEvent(event)
         self.closed.emit()
+
+
+class MissingDemoFilesDialog(QDialog):
+    """Warns that a demo was recorded with files that aren't loaded."""
+
+    def __init__(self, demo_name: str, missing: list[str], parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Demo files not loaded")
+        layout = QVBoxLayout(self)
+        files = "".join(f"<li>{html.escape(f)}</li>" for f in missing)
+        text = QLabel(
+            f"<p><b>{html.escape(demo_name)}</b> may not play back correctly, because it was recorded "
+            f"with files you have not loaded:</p><ul>{files}</ul><p>Play it anyway?</p>")
+        text.setTextFormat(Qt.TextFormat.RichText)
+        text.setWordWrap(True)
+        layout.addWidget(text)
+        self.never_check = QCheckBox("Never ask again")
+        self.never_check.setToolTip("Can be turned back on under Options → Ignore Missing Demo Files Warning")
+        self.session_check = QCheckBox("Ignore for this session")
+        self.session_check.setToolTip("Don't ask again until the launcher is restarted")
+        layout.addWidget(self.never_check)
+        layout.addWidget(self.session_check)
+        buttons = QDialogButtonBox()
+        self.play_button = buttons.addButton("Play anyway", QDialogButtonBox.ButtonRole.AcceptRole)
+        self.cancel_button = buttons.addButton("Cancel", QDialogButtonBox.ButtonRole.RejectRole)
+        # Enter (and the highlighted button) means Cancel: playing needs a deliberate click.
+        self.play_button.setAutoDefault(False)
+        self.cancel_button.setAutoDefault(True)
+        self.cancel_button.setDefault(True)
+        self.cancel_button.setFocus()
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
 
 
 class AboutDialog(QDialog):
