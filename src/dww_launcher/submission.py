@@ -202,14 +202,19 @@ def identifier_line(text: str, result: Lookup) -> str:
     return " | ".join(parts) or "N/A"
 
 
-def submission_text(identifier: str, hall: str | None, why: str, comments: str) -> str:
-    """Line 1: spreadsheet ID / idgames path. Line 2: HoF, HoS or N/A.
-    Then the "Why?" text (if any), then the comments."""
-    parts = [identifier or "N/A", hall or "N/A"]
-    if why.strip():
-        parts.append(why.strip())
-    if comments.strip():
-        parts.append(comments.strip())
+def submission_text(identifier: str, hall: str | None, why: str, comments: str, notes: str = "") -> str:
+    """The submission text file. Each section starts with a label:
+
+        Entry: <spreadsheet ID and/or idgames path>
+        HoF/HoS: <HoF, HoS or N/A>
+        Why: <reason>            (only if given)
+        Comments: <comments>     (only if given)
+        DWW Notes: <notes>       (only if given; not for the video description)
+    """
+    parts = [f"Entry: {identifier or 'N/A'}", f"HoF/HoS: {hall or 'N/A'}"]
+    for label, text in (("Why", why), ("Comments", comments), ("DWW Notes", notes)):
+        if text.strip():
+            parts.append(f"{label}: {text.strip()}")
     return "\n".join(parts) + "\n"
 
 

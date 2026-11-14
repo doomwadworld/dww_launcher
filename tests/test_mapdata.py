@@ -167,3 +167,48 @@ def test_udmf_thing_flags():
     m = load_map(WadFile(build_wad("PWAD", lumps)), "MAP07")
     assert m.things[0].skills == (False, False, True)
     assert m.things[1].skills == (True, False, False)
+
+
+def _lines_map(fmt, lines):
+    from dww_launcher.mapdata import MapData
+
+    return MapData("MAP01", fmt, vertices=[(0, 0), (64, 0)], lines=lines)
+
+
+@pytest.mark.parametrize("special,colour", [
+    (26, "blue"), (32, "blue"), (99, "blue"), (133, "blue"),
+    (27, "yellow"), (34, "yellow"), (134, "yellow"), (136, "yellow"),
+    (28, "red"), (33, "red"), (135, "red"), (137, "red"),
+    (0x3800 | (1 << 6), "red"), (0x3800 | (5 << 6), "blue"), (0x3800 | (6 << 6), "yellow"),
+    (0x3800, None), (0x3800 | (7 << 6), None),  # Boom "any key" / "all keys"
+    (1, None), (11, None),
+])
+def test_doom_key_lines(special, colour):
+    from dww_launcher.mapdata import Line
+
+    m = _lines_map("Doom", [Line(0, 1, special, False)])
+    assert m.key_colour(m.lines[0]) == colour
+
+
+def test_hexen_and_udmf_key_lines():
+    from dww_launcher.mapdata import Line
+
+    m = _lines_map("Hexen", [Line(0, 1, 13, False, args=(0, 0, 0, 2, 0)),      # Door_LockedRaise, blue card
+                             Line(0, 1, 202, False, args=(0, 0, 0, 0, 131)),   # Generic_Door, any yellow
+                             Line(0, 1, 83, False, args=(0, 0, 0, 0, 4)),      # ACS_LockedExecute, red skull
+                             Line(0, 1, 13, False, args=(0, 0, 0, 0, 0)),
+                             Line(0, 1, 0, False, lock=1)])                    # UDMF locknumber
+    assert [m.key_colour(ln) for ln in m.lines] == ["blue", "yellow", "red", None, "red"]
+    assert dict(map_stats(m))["Key-locked lines"] == "2 red, 1 yellow, 1 blue"
+
+
+def test_udmf_lock_fields_are_read():
+    text = (b'namespace="zdoom"; vertex{x=0;y=0;} vertex{x=8;y=0;}'
+            b'linedef{v1=0;v2=1;sidefront=0;special=13;arg3=3;} linedef{v1=0;v2=1;sidefront=0;locknumber=2;}')
+    m = load_map(WadFile(build_wad("PWAD", [("MAP01", b""), ("TEXTMAP", text), ("ENDMAP", b"")])), "MAP01")
+    assert [m.key_colour(ln) for ln in m.lines] == ["yellow", "blue"]
+
+
+def test_doom_map_has_no_key_lines():
+    m = load_map(WadFile(build_wad("PWAD", doom_map_lumps())), "MAP01")
+    assert dict(map_stats(m))["Key-locked lines"] == "None"

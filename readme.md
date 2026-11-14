@@ -16,9 +16,11 @@ Youtube: https://www.youtube.com/@DOOMWADWorld/
 
 - Keep a list of source ports and IWADs. macOS `.app` bundles are supported.
 - IWAD detection: Doom, Ultimate Doom, Doom II, Final Doom (TNT/Plutonia), Freedoom.
-- Mod list with drag-and-drop and load ordering. It shows how many levels each WAD contains.
+- Mod list with drag-and-drop and load ordering. It shows how many levels each WAD contains and
+  the folder it's in. Right-click a mod to show it in the file browser, open its folder in the
+  system file manager, copy its path or remove it.
   `.deh`/`.bex` files go to `-deh`, everything else to `-file`.
-- Map picker built from the IWAD and mods. Maps a mod replaces or adds are labelled, and adding
+- Map picker built from the IWAD and mods (tick **Mod maps only** to list just the mods' levels). Maps a mod replaces or adds are labelled, and adding
   a mod selects its first level.
 - Skill, `-complevel` (0-4, 9, 11, 21), `-fast` / `-respawn` / `-nomonsters` / `-tas` / `-dsdademo`,
   and free-form extra arguments.
@@ -33,7 +35,11 @@ Youtube: https://www.youtube.com/@DOOMWADWorld/
   - Type your own name to override; **Auto** goes back to the generated name.
 - **Delete unsuccessful attempts:** after the game exits, keep only the newest
   `<name>-NNNNN.lmp` attempt file and rename it to `<name>.lmp`.
-- **Demo playback** with `-playdemo` or `-timedemo`, plus optional `-skipsec <seconds>`.
+- **Demo playback** with `-playdemo` or `-timedemo`, plus optional `-skipsec <seconds>`. Before a
+  demo plays, the launcher reads the files it was recorded with from its footer (written by
+  DSDA-Doom, PrBoom+ and other modern ports) and warns if any aren't loaded, listing them. The
+  warning offers **Play anyway** / **Cancel**, plus **Never ask again** and **Ignore for this
+  session**; **Options → Ignore Missing Demo Files Warning** switches it off or back on.
 - Source port output is shown in the launcher. Settings are saved between sessions.
 - **Profiles** (toolbar): save every setting (except auto-download) as a named profile and load it
   back later: port, IWAD, mods, map, skill, complevel, flags, extra args, demo options and
@@ -44,6 +50,8 @@ Youtube: https://www.youtube.com/@DOOMWADWorld/
 ### File browser
 
 **File Browser ▸** on the right of the toolbar (or **Ctrl+B**) slides out a panel on the right.
+**⧉ Detach** moves it into a window of its own (**⇤ Attach** puts it back); it reopens the way
+you left it.
 
 - **File table** of `.wad`, `.pwd`, `.pk3`, `.lmp`, `.deh` and `.bex` files (any letter case) and
   folders. Columns: type, number of levels (or a demo's starting map and skill), game or IWAD,
@@ -51,9 +59,11 @@ Youtube: https://www.youtube.com/@DOOMWADWorld/
 - **Double-click:** a PWAD/PK3/DEH is added to the mods list, an IWAD becomes the IWAD, a demo is
   played with the current settings, and a folder is opened. Right-click for the same actions on
   several files at once, plus Copy Path.
-- **Detail tab:** file properties (size, dates, permissions) plus Doom details:
+- **Details tab:** file properties (size, dates, permissions) plus Doom details:
   - WADs: type, game, lumps, levels, map formats, sprite/flat/patch/music/sound counts, and
     notable lumps such as DEHACKED, UMAPINFO, MAPINFO, DECORATE and ZSCRIPT.
+  - Level totals for WADs and PK3s with maps: things, monsters on UV, secrets, linedefs,
+    sidedefs, vertices and sectors across all maps, plus the largest map.
   - Demos: format (vanilla, longtics, Boom, MBF, MBF21, DSDA-Doom), starting map, skill,
     players, length, flags, and, when the port wrote one, the port and command line used.
 - **Maps tab** (WADs and PK3s with levels): an automap-style preview with exits highlighted, and
@@ -65,21 +75,29 @@ Youtube: https://www.youtube.com/@DOOMWADWorld/
     **double-click** or **Fit** to see the whole map. When zoomed in, **middle-click** starts
     autoscroll: move away from the marker to scroll that way, faster the further you go. Click
     again, or release after holding, to stop.
-  - **Layer toggles**, whose icons double as the legend:
-    - **Things** (red monsters, green player start, grey everything else on UV single player)
-    - **Keys** (cards as squares, skull keys as diamonds, in their colours)
-    - **Weapons** (cyan triangles)
-    - **Secrets** (secret sectors filled purple)
-
-    Keys and weapons work independently of Things, so you can show only those.
+  - **Things ▾** opens a filter with every thing category (monsters, player starts, keys,
+    weapons, ammo, health, armor, power-ups, obstacles, decorations, teleport destinations,
+    other). Each category expands to the thing types on the current map, with their sprites and
+    counts, and every category and type can be switched on or off. Settings carry over to other
+    maps; **Defaults** restores the starting set. Things shown are those present on
+    Ultra-Violence in single player; keys are always included.
+  - **Key doors** draws doors and switches that need a key in that key's colour (Doom, Boom
+    generalised, Hexen-format and UDMF locks).
+  - **Secrets** fills secret sectors in purple; **Exits** highlights exit lines (orange) and
+    secret exit lines (violet).
+  - The in-map legend lists the exits. **Click it** to glide to the exit line, which is briefly
+    outlined; with several exits, click again for the next one.
   - **Sprites:** things are drawn with their own pictures, read from your IWAD (the selected
     one first, then your other IWADs for anything missing) and from the WAD being previewed, so
-    custom sprites show up too. Nothing is bundled with the launcher. Monsters and player starts
-    appear as face close-ups on red or green tiles. Without an IWAD the plain shapes are used.
+    custom sprites show up too. Nothing is bundled with the launcher. Every icon sits on a
+    translucent tile in its category's colour so it stands out from the map; monsters and player
+    starts appear as face close-ups. Without an IWAD, coloured shapes are used instead.
   - **Hover** over a thing to highlight it and see a tooltip with its name, category and type
     number, the skill levels it appears on, ambush/multiplayer-only flags, its position and
     which way it faces. Things stacked on the same spot are listed together.
-  - **⧉ Pop out** opens the preview in its own resizable window that follows the selected map.
+  - **⧉ Pop out** opens the preview in its own resizable window, with its own list of the file's
+    maps (kept in step with the panel). While it's open the panel shows a note instead of a
+    second copy of the map; closing the window brings the docked preview back.
 - The panel remembers its width, internal layout, column widths and layer toggles.
 
 ### Demo Submission tab
@@ -97,12 +115,20 @@ Youtube: https://www.youtube.com/@DOOMWADWorld/
   either box is checked.
 - **Comments** box. Both boxes share one `[characters]/4500` counter and warn about YouTube's
   5000-character description limit and its ban on angle brackets.
+- **Notes for DWW:** notes for the channel owner. They go into the text file but not the video
+  description, so they don't count towards the limit.
 - **Create Text File** writes `[zip file name].txt` to the text file folder, which can follow
-  the demo folder or be set separately. The file contains:
-  1. the spreadsheet ID and/or idgames path, e.g. `12493 | levels/doom2/v-z/zzsketch`
-  2. `HoF`, `HoS` or `N/A`
-  3. the "Why?" text (if any)
-  4. the comments
+  the demo folder or be set separately. Each section starts with a label:
+
+  ```
+  Entry: 12493 | levels/doom2/v-z/zzsketch
+  HoF/HoS: HoF
+  Why: Great use of the sketch theme.
+  Comments: UV max, no saves.
+  DWW Notes: Please credit me as Andy.
+  ```
+
+  The Why, Comments and DWW Notes lines appear only when filled in.
 - **Create Zip File…** zips the chosen demos together with that text file as `[zip file name].zip`.
 
 ### Spreadsheet data

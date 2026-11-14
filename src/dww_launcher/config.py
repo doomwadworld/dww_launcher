@@ -35,6 +35,10 @@ class Settings:
     file_browser_dir: str = ""
     file_browser_visible: bool = False
     file_browser_width: int = 640  # panel width in pixels
+    file_browser_floating: bool = False  # detached into its own window
+    file_browser_float_geometry: list = field(default_factory=list)  # [x, y, width, height]
+    mod_maps_only: bool = False  # map list shows only levels from the loaded mods
+    ignore_demo_file_warning: bool = False  # don't warn when a demo's recorded files aren't loaded
     file_browser_state: dict = field(default_factory=dict)  # splitter positions, column widths
     map_layers: dict = field(default_factory=dict)  # map preview toggles: things/keys/weapons/secrets
     auto_download: bool | None = None  # None = never asked

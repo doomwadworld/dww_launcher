@@ -97,6 +97,19 @@ class DemoInfo:
         return [Path(v).name for v in self._cmdline_values("-file")]
 
     @property
+    def deh_files(self) -> list[str]:
+        return [Path(v).name for v in self._cmdline_values("-deh")]
+
+    @property
+    def required_files(self) -> list[str]:
+        """File names the demo was recorded with (IWAD, then -file and -deh), from the footer.
+
+        Empty for demos without a footer (e.g. vanilla or Chocolate Doom recordings).
+        """
+        names = ([self.iwad] if self.iwad else []) + self.files + self.deh_files
+        return list(dict.fromkeys(names))
+
+    @property
     def map_name(self) -> str:
         """E2M5 / MAP07, or e.g. "E1M3 / MAP03" when Doom vs Doom II can't be told apart."""
         iwad = self.iwad.lower()
