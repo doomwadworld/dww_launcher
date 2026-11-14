@@ -156,9 +156,16 @@ def test_text_warnings():
 
 def test_submission_text():
     assert submission_text("12493", "HoF", "Great maps", "Played on UV.\nNo saves.") == \
-        "12493\nHoF\nGreat maps\nPlayed on UV.\nNo saves.\n"
-    assert submission_text("", None, "", "") == "N/A\nN/A\n"
-    assert submission_text("x", "HoS", "  ", "c") == "x\nHoS\nc\n"
+        "Entry: 12493\nHoF/HoS: HoF\nWhy: Great maps\nComments: Played on UV.\nNo saves.\n"
+    assert submission_text("", None, "", "") == "Entry: N/A\nHoF/HoS: N/A\n"
+    assert submission_text("x", "HoS", "  ", "c") == "Entry: x\nHoF/HoS: HoS\nComments: c\n"
+
+
+def test_submission_text_dww_notes_come_last():
+    text = submission_text("1", None, "", "Nice.", "  Please credit me as X  ")
+    assert text == "Entry: 1\nHoF/HoS: N/A\nComments: Nice.\nDWW Notes: Please credit me as X\n"
+    assert submission_text("1", None, "", "", "only notes").endswith("DWW Notes: only notes\n")
+
 
 
 @pytest.mark.parametrize("text,expected", [

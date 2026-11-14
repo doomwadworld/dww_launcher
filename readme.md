@@ -29,7 +29,11 @@ playing back and packaging demos.
   - Type your own name to override; **Auto** goes back to the generated name.
 - **Delete unsuccessful attempts:** after the game exits, keep only the newest
   `<name>-NNNNN.lmp` attempt file and rename it to `<name>.lmp`.
-- **Demo playback** with `-playdemo` or `-timedemo`, plus optional `-skipsec <seconds>`.
+- **Demo playback** with `-playdemo` or `-timedemo`, plus optional `-skipsec <seconds>`. Before a
+  demo plays, the launcher reads the files it was recorded with from its footer (written by
+  DSDA-Doom, PrBoom+ and other modern ports) and warns if any aren't loaded, listing them. The
+  warning offers **Play anyway** / **Cancel**, plus **Never ask again** and **Ignore for this
+  session**; **Options → Ignore Missing Demo Files Warning** switches it off or back on.
 - Source port output is shown in the launcher. Settings are saved between sessions.
 - **Profiles** (toolbar): save every setting (except auto-download) as a named profile and load it
   back later: port, IWAD, mods, map, skill, complevel, flags, extra args, demo options and
@@ -105,12 +109,20 @@ you left it.
   either box is checked.
 - **Comments** box. Both boxes share one `[characters]/4500` counter and warn about YouTube's
   5000-character description limit and its ban on angle brackets.
+- **Notes for DWW:** notes for the channel owner. They go into the text file but not the video
+  description, so they don't count towards the limit.
 - **Create Text File** writes `[zip file name].txt` to the text file folder, which can follow
-  the demo folder or be set separately. The file contains:
-  1. the spreadsheet ID and/or idgames path, e.g. `12493 | levels/doom2/v-z/zzsketch`
-  2. `HoF`, `HoS` or `N/A`
-  3. the "Why?" text (if any)
-  4. the comments
+  the demo folder or be set separately. Each section starts with a label:
+
+  ```
+  Entry: 12493 | levels/doom2/v-z/zzsketch
+  HoF/HoS: HoF
+  Why: Great use of the sketch theme.
+  Comments: UV max, no saves.
+  DWW Notes: Please credit me as Andy.
+  ```
+
+  The Why, Comments and DWW Notes lines appear only when filled in.
 - **Create Zip File…** zips the chosen demos together with that text file as `[zip file name].zip`.
 
 ### Spreadsheet data
