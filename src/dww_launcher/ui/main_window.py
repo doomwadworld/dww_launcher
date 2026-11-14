@@ -277,14 +277,14 @@ class MainWindow(QMainWindow):
         oform.addRow("Map:", map_row)
 
         self.skill_combo = QComboBox()
-        self.skill_combo.addItem("(default)", None)
+        self.skill_combo.addItem("None", None)
         for value, name in SKILLS.items():
             self.skill_combo.addItem(f"{value} - {name}", value)
         self.skill_combo.setCurrentIndex(4)  # Ultra-Violence
         oform.addRow("Skill:", self.skill_combo)
 
         self.complevel_combo = QComboBox()
-        self.complevel_combo.addItem("(port default)", None)
+        self.complevel_combo.addItem("None", None)
         for value, name in COMPLEVELS.items():
             self.complevel_combo.addItem(f"{value} - {name}", value)
         oform.addRow("Complevel:", self.complevel_combo)
@@ -292,6 +292,7 @@ class MainWindow(QMainWindow):
         self.complevel_note.setWordWrap(True)
         self.complevel_note.setStyleSheet("color: #b36b00;")
         self.complevel_note.hide()
+        self.complevel_combo.setCurrentIndex(4) # complevel 3
         oform.addRow("", self.complevel_note)
 
         flags = QHBoxLayout()
@@ -351,7 +352,7 @@ class MainWindow(QMainWindow):
         play = QPushButton("Play demo…")
         play.clicked.connect(self._play_demo)
         self.timedemo_check = QCheckBox("Use -timedemo")
-        self.timedemo_check.setToolTip("Play back with -timedemo (benchmark mode) instead of -playdemo")
+        self.timedemo_check.setToolTip("Play back with -timedemo (benchmark mode, goes as fast as possible) instead of -playdemo")
         play_row.addWidget(play)
         play_row.addWidget(self.timedemo_check)
         play_row.addStretch()
@@ -721,7 +722,7 @@ class MainWindow(QMainWindow):
         current = self.map_combo.currentData()
         self.map_combo.blockSignals(True)
         self.map_combo.clear()
-        self.map_combo.addItem("(start normally)", None)
+        self.map_combo.addItem("None", None)
         mod_only = self.mod_maps_check.isChecked()
         for m in sorted(sources, key=map_sort_key):
             src = sources[m]
