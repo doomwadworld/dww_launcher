@@ -88,7 +88,12 @@ def test_level_names_umapinfo(mapwad):
 
 def test_wad_details(mapwad):
     path = mapwad("d.wad", ["MAP01"], extra=[("DEHACKED", b"x"), ("D_RUNNIN", b"MUS")])
-    general, doom = details(path)
+    general, doom, totals = details(path)
+    assert totals[0] == "Level totals"
+    t = dict(totals[1])
+    assert (t["Total things"], t["Total monsters (UV)"], t["Total secrets"], t["Total linedefs"],
+            t["Total sidedefs"], t["Total vertices"], t["Total sectors"]) == ("8", "2", "1", "7", "8", "6", "2")
+    assert t["Largest map"] == "MAP01 (7 linedefs)"
     assert general[0] == "General" and dict(general[1])["Name"] == "d.wad"
     rows = dict(doom[1])
     assert rows["WAD type"].startswith("PWAD") and rows["Levels"] == "1  (MAP01)"
@@ -114,3 +119,25 @@ def test_details_of_broken_file(tmp_path):
     p = tmp_path / "bad.lmp"
     p.write_bytes(b"\x01")
     assert details(p)[-1][0] == "Problem"
+
+
+def test_totals_over_several_maps_and_pk3(mapwad, tmp_path):
+    rows = dict(details(mapwad("three.wad", ["MAP01", "MAP02", "MAP03"]))[2][1])
+    assert rows["Total things"] == "24" and rows["Total linedefs"] == "21" and rows["Total secrets"] == "3"
+    pk3_rows = dict(details(make_pk3(tmp_path))[2][1])
+    assert pk3_rows["Total monsters (UV)"] == "4"
+    assert len(details(DEMOS / "dsda_cl9_boom.lmp")) == 2  # no totals for non-level files
+
+
+def test_totals_count_udmf_and_hexen():
+    from conftest import build_wad
+    from test_mapdata import UDMF
+
+    from dww_launcher.mapdata import wad_totals
+    from dww_launcher.wad import WadFile
+
+    wad = WadFile(build_wad("PWAD", [("MAP07", b""), ("TEXTMAP", UDMF), ("ENDMAP", b"")]))
+    totals, largest = wad_totals([wad])
+    assert totals == {"things": 3, "monsters": 1, "secrets": 1, "linedefs": 2, "sidedefs": 3,
+                      "vertices": 3, "sectors": 2}
+    assert largest == ("MAP07", 2)

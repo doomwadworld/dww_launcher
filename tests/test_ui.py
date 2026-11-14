@@ -1,6 +1,7 @@
 """GUI tests with a fake source port (run headless via QT_QPA_PLATFORM=offscreen)."""
 
 import os
+import struct
 import sys
 import zipfile
 from datetime import datetime
@@ -13,7 +14,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 pytest.importorskip("PySide6")
 
 from PySide6.QtCore import QEventLoop, Qt, QTimer  # noqa: E402
-from PySide6.QtWidgets import QApplication, QFileDialog, QInputDialog, QMessageBox  # noqa: E402
+from PySide6.QtWidgets import QApplication, QDialog, QFileDialog, QInputDialog, QLabel, QMessageBox  # noqa: E402
 
 from dww_launcher.config import Settings  # noqa: E402
 from dww_launcher.ui.main_window import MainWindow  # noqa: E402
@@ -49,6 +50,12 @@ def isolated_windows(qapp, monkeypatch, tmp_path):
     Closing a window saves settings, so the save patch must outlive the close.
     """
     monkeypatch.setattr(Settings, "save", lambda self, path=None: None)
+
+    def unexpected_dialog(self):
+        raise AssertionError("unexpected missing-demo-files warning")
+
+    # A modal dialog would hang a headless test run; tests that expect it patch exec themselves.
+    monkeypatch.setattr("dww_launcher.ui.main_window.MissingDemoFilesDialog.exec", unexpected_dialog)
     monkeypatch.setattr("dww_launcher.ui.main_window.sheets_dir", lambda: tmp_path / "sheets")
     monkeypatch.setattr("dww_launcher.ui.main_window.profiles_dir", lambda: tmp_path / "profiles")
     opened = []
@@ -103,7 +110,7 @@ def test_maps_and_auto_select(qapp, tmp_path, wad_factory):
     w.pwad_list.add_paths([str(pwad)])
 
     assert map_labels(w) == [
-        "(start normally)", "MAP01", "MAP02   — replaced by zzsketch.wad", "MAP03",
+        "None", "MAP01", "MAP02   — replaced by zzsketch.wad", "MAP03",
         "MAP33   — new in zzsketch.wad",
     ]
     assert w.map_combo.currentData() == "MAP02"  # mod's first level auto-selected
@@ -137,7 +144,7 @@ def test_v12_complevel(qapp, tmp_path, wad_factory):
 
     w = MainWindow(Settings(iwads=[str(iwad)], demo_dir=str(tmp_path)))
     w.pwad_list.add_paths([str(new)])
-    assert w.complevel_combo.currentData() is None
+    assert w.complevel_combo.currentData() == 3  # the default, untouched by a modern mod
 
     w.pwad_list.add_paths([str(old)])
     assert w.complevel_combo.currentData() == 0
@@ -155,7 +162,8 @@ def test_v12_complevel_not_for_doom2(qapp, tmp_path, wad_factory):
     os.utime(old, (ts, ts))
     w = MainWindow(Settings(iwads=[str(iwad)], demo_dir=str(tmp_path)))
     w.pwad_list.add_paths([str(old)])
-    assert w.complevel_combo.currentData() is None
+    assert w.complevel_combo.currentData() == 3  # Doom II: no automatic switch to complevel 0
+    assert w.complevel_note.isHidden()
 
 
 def test_record_sequence_and_keep_latest(qapp, tmp_path, wad_factory, fake_port, no_dialogs):
@@ -303,7 +311,8 @@ def test_create_text_and_zip(qapp, sheet_window, tmp_path, monkeypatch, no_dialo
     w.comments_edit.setPlainText("UV max.\nNo saves.")
 
     w._create_text_file()
-    assert (demo_dir / "zzsketch.txt").read_text() == "12493\nHoF\nGreat layouts\nUV max.\nNo saves.\n"
+    assert (demo_dir / "zzsketch.txt").read_text() == \
+        "Entry: 12493\nHoF/HoS: HoF\nWhy: Great layouts\nComments: UV max.\nNo saves.\n"
 
     demos = []
     for i in (1, 2):
@@ -318,7 +327,7 @@ def test_create_text_and_zip(qapp, sheet_window, tmp_path, monkeypatch, no_dialo
     assert seen == [str(demo_dir / "zzsketch.zip")]
     with zipfile.ZipFile(demo_dir / "zzsketch.zip") as zf:
         assert sorted(zf.namelist()) == ["zzsketch.txt", "zzsketch_1.lmp", "zzsketch_2.lmp"]
-        assert zf.read("zzsketch.txt").decode().startswith("12493\nHoF\nGreat layouts\n")
+        assert zf.read("zzsketch.txt").decode().startswith("Entry: 12493\nHoF/HoS: HoF\nWhy: Great layouts\n")
 
 
 def test_package_button_moved(qapp, sheet_window):
@@ -500,7 +509,7 @@ def test_txt_dir_follows_demo_dir(qapp, sheet_window, tmp_path, monkeypatch, no_
 
     w.entry_edit.setText("12000")
     w._create_text_file()
-    assert (other / "fresh.txt").read_text().startswith("12000\nN/A\n")
+    assert (other / "fresh.txt").read_text().startswith("Entry: 12000\nHoF/HoS: N/A\n")
     assert w.settings.txt_dir == str(other) and not w.settings.txt_dir_same_as_demo
 
     new_demo = tmp_path / "newdemos"
@@ -785,6 +794,9 @@ def test_browser_actions_reach_launcher(qapp, browse_dir, tmp_path, monkeypatch,
     fb._on_double_click(fb.table.item(select(fb, "game.wad"), 0))
     assert w.iwad_combo.currentData() == str(browse_dir / "game.wad")
     assert str(browse_dir / "game.wad") not in w.pwad_list.paths()
+    # RUN.LMP was recorded with freedoom2.wad, which isn't loaded: the warning comes first.
+    monkeypatch.setattr("dww_launcher.ui.main_window.MissingDemoFilesDialog.exec",
+                        lambda self: QDialog.DialogCode.Accepted)
     fb._on_double_click(fb.table.item(select(fb, "RUN.LMP"), 0))
     assert started and started[0].playdemo == str(browse_dir / "RUN.LMP")
 
@@ -883,14 +895,22 @@ def preview(qapp):
     return pv
 
 
+def first_marker(preview, kind):
+    return next(t for k, t in preview._markers if k == kind)
+
+
 def test_preview_layers_prepared(preview):
-    t = preview._things
-    assert len(t["monster"]) == 2 and len(t["player"]) == 1  # UV, single-player only
-    assert len(t["key"]) == 1 and len(t["weapon"]) == 1
+    from collections import Counter
+
+    # UV single-player things: 2 imps, player 1 + deathmatch start, a key and a shotgun
+    assert Counter(k for k, _ in preview._markers) == {"monster": 2, "player": 2, "key": 1, "weapon": 1}
+    visible = Counter(t.type for _, t in preview.visible_markers())
+    assert visible == {3001: 2, 1: 1, 5: 1, 2001: 1}  # deathmatch starts are hidden by default
     assert preview.legend_entries() == [("exit", "exit")]
-    preview.grab()  # paints without errors with every layer on
-    for name in ("things", "keys", "weapons", "secrets"):
-        preview.set_layer(name, True)
+    preview.grab()  # paints without errors
+    preview.set_thing_filter(set(), set())
+    preview.set_layer("exits", False)
+    assert preview.legend_entries() == []
     preview.grab()
 
 
@@ -954,8 +974,8 @@ def test_layer_toggles_and_popout(qapp, browse_dir):
     changes = []
     fb.layers_changed.connect(changes.append)
     select(fb, "MULTI.WAD")
-    fb.viewer.checks["things"].setChecked(True)
-    assert fb.preview.layers["things"] and changes[-1]["things"]
+    fb.viewer.thing_filter.show_all()
+    assert fb.preview.hidden_categories == set() and changes[-1]["hidden_categories"] == []
 
     fb.pop_out_map()
     win = fb.map_window
@@ -984,10 +1004,15 @@ def test_browser_size_layout_and_layers_persist(qapp, browse_dir, tmp_path, monk
     assert requested == [410]  # opens at the remembered width
 
     w.file_browser.main_split.setSizes([100, 300])
-    w.file_browser.viewer.checks["things"].setChecked(True)
-    w.file_browser.viewer.checks["keys"].setChecked(False)
+    viewer = w.file_browser.viewer
+    viewer.checks["exits"].setChecked(False)
+    keys = next(viewer.thing_filter.tree.topLevelItem(i) for i in range(viewer.thing_filter.tree.topLevelItemCount())
+                if viewer.thing_filter.tree.topLevelItem(i).text(0) == "Keys")
+    keys.setCheckState(0, Qt.CheckState.Unchecked)
     w._save_state()
-    assert s.map_layers == {"things": True, "keys": False, "weapons": True, "secrets": True}
+    assert s.map_layers == {"secrets": True, "exits": False, "keydoors": True,
+                            "hidden_categories": ["Decoration", "Key", "Obstacle", "Other", "Teleport"],
+                            "hidden_types": [2, 3, 4, 11]}
     assert set(s.file_browser_state) == {"main_split", "maps_split", "right_split", "columns"}
     # The width the user leaves the panel at is remembered; a width squeezed below the
     # minimum (e.g. by a small screen) is not.
@@ -1016,9 +1041,9 @@ def test_hover_highlights_and_describes_things(preview):
     from PySide6.QtTest import QTest
     from PySide6.QtWidgets import QToolTip
 
-    preview.set_layer("things", True)
+    preview.set_thing_filter(set(), set())
     preview.show()
-    imp = preview._things["monster"][0]
+    imp = first_marker(preview, "monster")
     c = preview.map_to_screen(imp.x, imp.y)
     assert [t.name for _, t in preview.markers_at(c)][:1] == ["Imp"]
     assert preview.tooltip_for(c).startswith("Imp\nMonster · type 3001")
@@ -1037,9 +1062,9 @@ def test_hover_highlights_and_describes_things(preview):
     preview.event(QHelpEvent(QEvent.Type.ToolTip, far, preview.mapToGlobal(far)))
     assert QToolTip.text() == "hint"
 
-    preview.set_layer("things", False)  # hidden things can't be hovered
+    preview.set_thing_filter({"Monster"}, set())  # hidden things can't be hovered
     assert preview.markers_at(c) == [] and preview._hover == []
-    key = preview._things["key"][0]
+    key = first_marker(preview, "key")
     assert preview.tooltip_for(preview.map_to_screen(key.x, key.y)).startswith("Blue keycard\nKey")
 
 
@@ -1053,7 +1078,7 @@ def test_hover_lists_stacked_things(qapp):
     pv = MapPreview()
     pv.resize(300, 300)
     pv.set_map(m)
-    pv.set_layer("things", True)
+    pv.set_thing_filter(set(), set())
     text = pv.tooltip_for(pv.map_to_screen(100, 100))
     assert text.count("Imp") == 3 and text.endswith("…and 2 more here")
 
@@ -1072,8 +1097,8 @@ def test_preview_uses_sprite_icons(qapp, preview):
                                      ("BKEYA0", pic), ("S_END", b"")]))
     m = preview.map
     preview.set_map(m, sprites=SpriteSource([wad]))
-    preview.set_layer("things", True)
-    imp = preview._things["monster"][0]
+    preview.set_thing_filter(set(), set())
+    imp = first_marker(preview, "monster")
     assert preview.icon(3001) is not None and preview.icon(2001) is None  # no shotgun sprite: shape
     assert preview.marker_radius("monster", imp) == preview.icon_box("monster") / 2
     c = preview.map_to_screen(imp.x, imp.y)
@@ -1103,3 +1128,403 @@ def test_launcher_offers_selected_iwad_first(qapp, tmp_path, wad_factory):
     w = MainWindow(Settings(iwads=[str(a), str(b)], last_iwad=str(b), demo_dir=str(tmp_path),
                             auto_download=False))
     assert w._sprite_iwads() == [str(b), str(a)]
+
+
+# ------------------------------------------------------------ thing filter, exits
+
+def _filter_item(tf, label):
+    for i in range(tf.tree.topLevelItemCount()):
+        item = tf.tree.topLevelItem(i)
+        if item.text(0) == label:
+            return item
+        for j in range(item.childCount()):
+            if item.child(j).text(0) == label:
+                return item.child(j)
+    raise AssertionError(label)
+
+
+def test_normalize_layers_migrates_old_settings():
+    from dww_launcher.ui.map_view import DEFAULT_LAYERS, normalize_layers
+
+    assert normalize_layers({"things": True, "keys": False, "weapons": True, "secrets": False}) == \
+        {**DEFAULT_LAYERS, "secrets": False}
+    out = normalize_layers({"hidden_categories": ["Monster", "Bogus"], "hidden_types": [5, "6"], "exits": "x"})
+    assert out["hidden_categories"] == ["Monster"] and out["hidden_types"] == [5, 6] and out["exits"] is True
+
+
+def test_thing_filter_tree(qapp):
+    from dww_launcher.ui.map_view import MapViewer
+
+    viewer = MapViewer()
+    viewer.set_map(_square_map())
+    tf = viewer.thing_filter
+    seen = []
+    viewer.layers_changed.connect(seen.append)
+    monsters = _filter_item(tf, "Monsters")
+    assert monsters.text(1) == "2" and monsters.checkState(0) == Qt.CheckState.Checked
+    assert _filter_item(tf, "Imp").text(1) == "2"
+    assert _filter_item(tf, "Player starts").checkState(0) == Qt.CheckState.PartiallyChecked  # DM start hidden
+    assert _filter_item(tf, "Ammo").text(0) == "Ammo" and _filter_item(tf, "Health").text(0) == "Health"
+
+    _filter_item(tf, "Imp").setCheckState(0, Qt.CheckState.Unchecked)  # one type off
+    assert 3001 in viewer.preview.hidden_types and seen[-1]["hidden_types"] == [2, 3, 4, 11, 3001]
+    assert _filter_item(tf, "Monsters").checkState(0) == Qt.CheckState.PartiallyChecked
+    assert not any(t.type == 3001 for _, t in viewer.preview.visible_markers())
+
+    _filter_item(tf, "Monsters").setCheckState(0, Qt.CheckState.Checked)  # whole category back on
+    assert 3001 not in viewer.preview.hidden_types
+
+    _filter_item(tf, "Weapons").setCheckState(0, Qt.CheckState.Unchecked)
+    assert "Weapon" in viewer.preview.hidden_categories
+    _filter_item(tf, "Shotgun").setCheckState(0, Qt.CheckState.Checked)  # one type of a hidden category
+    assert "Weapon" not in viewer.preview.hidden_categories
+    assert any(t.type == 2001 for _, t in viewer.preview.visible_markers())
+
+    tf.hide_all()
+    assert viewer.preview.visible_markers() == []
+    tf.show_all()
+    assert len(viewer.preview.visible_markers()) == 6
+    tf.reset()
+    assert viewer.layers() == {**__import__("dww_launcher.ui.map_view", fromlist=["x"]).DEFAULT_LAYERS}
+
+
+def test_exits_toggle_and_legend_jump(qapp, preview):
+    from PySide6.QtCore import QPoint
+    from PySide6.QtTest import QTest
+
+    assert preview.exit_count("exit") == 1
+    assert len(preview._lines["one"]) == 6  # the exit line is still drawn as a wall
+    preview.show()
+    preview.grab()
+    rect, kind = preview._legend_rects[0]
+    assert kind == "exit"
+    preview._animation.setDuration(0)
+    QTest.mouseClick(preview, Qt.MouseButton.LeftButton, pos=rect.center().toPoint())
+    target = preview._exit_groups["exit"][0]
+    assert preview.zoom >= 1.0 and preview._flash == (target, "exit")
+    QTest.qWait(50)
+    assert (preview.center.x(), preview.center.y()) == pytest.approx((target.center().x(), target.center().y()))
+
+    preview.set_layer("exits", False)
+    preview.grab()
+    assert preview._legend_rects == [] and preview.legend_entries() == []
+
+
+def test_exit_clusters_and_cycling(qapp):
+    from PySide6.QtCore import QLineF
+
+    from dww_launcher.mapdata import Line, MapData
+    from dww_launcher.ui.map_view import MapPreview, _cluster
+
+    # two lines of one switch close together, and a second exit far away
+    boxes = _cluster([QLineF(0, 0, 0, 64), QLineF(16, 0, 16, 64), QLineF(4000, 4000, 4064, 4000)])
+    assert len(boxes) == 2
+    m = MapData("MAP01", "Doom", vertices=[(0, 0), (0, 64), (16, 0), (16, 64), (4000, 4000), (4064, 4000)])
+    m.lines = [Line(0, 1, 11, False), Line(2, 3, 11, False), Line(4, 5, 52, False)]
+    pv = MapPreview()
+    pv.resize(400, 300)
+    pv.set_map(m)
+    assert pv.exit_count("exit") == 2 and pv.legend_entries() == [("exit", "exit (2)")]
+    first = pv.jump_to_exit("exit", animate=False)
+    second = pv.jump_to_exit("exit", animate=False)
+    third = pv.jump_to_exit("exit", animate=False)
+    assert first != second and third == first  # cycles through the exits
+    assert pv.jump_to_exit("secret") is None
+
+
+# ------------------------------------------------------------ round 7
+
+def test_app_name_and_details_tab(qapp, tmp_path):
+    from dww_launcher.ui.file_browser import FileBrowser
+
+    w = MainWindow(Settings(demo_dir=str(tmp_path), auto_download=False))
+    assert w.windowTitle() == "DOOM WAD World Launcher"
+    fb = FileBrowser()
+    assert [fb.tabs.tabText(i) for i in range(fb.tabs.count())] == ["Details", "Maps"]
+
+
+def test_mod_maps_only(qapp, tmp_path, wad_factory, monkeypatch):
+    iwad = wad_factory("doom2.wad", "IWAD", ["MAP01", "MAP02", "MAP03"])
+    pwad = wad_factory("mod.wad", "PWAD", ["MAP02", "MAP33"])
+    s = Settings(iwads=[str(iwad)], last_pwads=[str(pwad)], demo_dir=str(tmp_path), auto_download=False)
+    w = MainWindow(s)
+    def maps():
+        return [w.map_combo.itemData(i) for i in range(w.map_combo.count())]
+    assert maps() == [None, "MAP01", "MAP02", "MAP03", "MAP33"]
+    w._select_data(w.map_combo, "MAP01")
+    w.mod_maps_check.setChecked(True)
+    assert maps() == [None, "MAP02", "MAP33"]
+    assert w.map_combo.currentData() is None  # MAP01 is no longer listed
+    w._save_state()
+    assert s.mod_maps_only
+    assert w.capture_profile().mod_maps_only
+    w.mod_maps_check.setChecked(False)
+    assert maps()[1:4] == ["MAP01", "MAP02", "MAP03"]
+    assert MainWindow(s).mod_maps_check.isChecked()  # restored next session
+
+
+def test_mods_context_menu_and_reveal(qapp, browse_dir, tmp_path, monkeypatch, no_dialogs):
+    import dww_launcher.ui.main_window as mwmod
+
+    mod = str(browse_dir / "MULTI.WAD")
+    w = MainWindow(Settings(demo_dir=str(tmp_path), last_pwads=[mod, str(browse_dir / "fix.deh")],
+                            auto_download=False))
+    w.pwad_list.resize(500, 100)
+    w.pwad_list.grab()  # the folder column paints
+    actions = {a.text(): a for a in w.mods_context_actions([mod])}
+    assert list(actions) == ["Show in File Browser", "Open Containing Folder", "Copy Path", "Remove"]
+    assert [a.text() for a in w.mods_context_actions([mod, str(browse_dir / "fix.deh")])] == ["Copy Paths", "Remove (2)"]
+
+    opened = []
+    monkeypatch.setattr(mwmod, "open_folder", lambda p: opened.append(p) or True)
+    actions["Open Containing Folder"].trigger()
+    assert opened == [str(browse_dir)]
+
+    actions["Show in File Browser"].trigger()
+    fb = w.file_browser
+    assert w.browser_dock.isVisibleTo(w)
+    assert fb.directory == str(browse_dir.resolve())
+    assert fb.selected_paths() == [mod]
+
+    w.pwad_list.item(0).setSelected(True)
+    actions["Remove"].trigger()
+    assert w.pwad_list.paths() == [str(browse_dir / "fix.deh")]
+    fb.stop()
+
+
+def test_popout_replaces_docked_preview_and_syncs_lists(qapp, browse_dir):
+    from dww_launcher.ui.file_browser import FileBrowser
+
+    fb = FileBrowser()
+    fb.set_directory(browse_dir)
+    wait_for_scan(fb)
+    select(fb, "MULTI.WAD")
+    assert fb.viewer_stack.currentIndex() == 0 and fb.viewer.preview.map.name == "MAP01"
+
+    fb.pop_out_map()
+    win = fb.map_window
+    assert fb.viewer_stack.currentIndex() == 1  # the note replaces the docked preview
+    assert fb.viewer.preview.map is None  # ...which no longer draws anything
+    assert [win.map_list.item(i).text() for i in range(win.map_list.count())] == ["MAP01", "MAP02   Two", "MAP03"]
+    assert not win.map_list.isHidden() and win.map_list.currentRow() == 0
+
+    win.map_list.setCurrentRow(2)  # choosing in the window drives the panel
+    assert fb.map_list.currentRow() == 2 and win.viewer.preview.map.name == "MAP03"
+    fb.map_list.setCurrentRow(1)  # and the other way round
+    assert win.map_list.currentRow() == 1 and win.viewer.preview.map.name == "MAP02"
+    assert fb.viewer.preview.map is None
+
+    select(fb, "single.pwd")  # one map: the window's list is hidden
+    assert win.map_list.isHidden() and win.viewer.preview.map.name == "MAP07"
+
+    fb.bring_back_button.click()  # closes the window and restores the docked preview
+    assert fb.map_window is None and fb.viewer_stack.currentIndex() == 0
+    assert fb.viewer.preview.map.name == "MAP07"
+    fb.stop()
+
+
+def test_key_door_layer(qapp):
+    from conftest import build_wad, doom_map_lumps
+    from dww_launcher.mapdata import load_map
+    from dww_launcher.ui.map_view import MapViewer
+    from dww_launcher.wad import WadFile
+
+    lumps = doom_map_lumps()
+    linedefs = struct.pack("<HHHHHHH", 0, 4, 1, 26, 0, 0, 0xFFFF) + struct.pack("<HHHHHHH", 4, 1, 1, 135, 0, 1, 0xFFFF)
+    lumps = [(n, linedefs if n == "LINEDEFS" else d) for n, d in lumps]
+    viewer = MapViewer()
+    viewer.resize(700, 400)
+    viewer.show()  # Qt only delivers resize events to shown widgets
+    viewer.set_map(load_map(WadFile(build_wad("PWAD", lumps)), "MAP01"))
+    pv = viewer.preview
+    assert (len(pv._lines["key_blue"]), len(pv._lines["key_red"]), len(pv._lines["key_yellow"])) == (1, 1, 0)
+    assert viewer.checks["keydoors"].isChecked() and viewer.checks["keydoors"].text() == "Key doors"
+    viewer.grab()
+    viewer.checks["keydoors"].setChecked(False)
+    assert not pv.layers["keydoors"] and viewer.layers()["keydoors"] is False
+    viewer.grab()
+    viewer.resize(300, 400)  # narrow: icon-only toggles
+    qapp.processEvents()
+    assert viewer.checks["keydoors"].text() == "" and "Key doors" in viewer.checks["keydoors"].toolTip()
+    viewer.resize(800, 400)
+    qapp.processEvents()
+    assert viewer.checks["keydoors"].text() == "Key doors"
+    viewer.close()
+
+
+def test_detach_and_reattach_browser(qapp, browse_dir, tmp_path):
+    s = Settings(demo_dir=str(tmp_path), file_browser_dir=str(browse_dir), auto_download=False)
+    w = MainWindow(s)
+    w.show()
+    w.browser_action.setChecked(True)
+    qapp.processEvents()
+    fb = w.file_browser
+    assert not w.browser_dock.isFloating() and fb.detach_button.text() == "⧉ Detach"
+
+    fb.detach_button.click()
+    qapp.processEvents()
+    assert w.browser_dock.isFloating() and w.browser_dock.isVisible()
+    assert fb.detach_button.text() == "⇤ Attach" and s.file_browser_floating
+    w._save_state()
+    assert s.file_browser_floating and len(s.file_browser_float_geometry) == 4
+
+    fb.detach_button.click()
+    qapp.processEvents()
+    assert not w.browser_dock.isFloating() and not s.file_browser_floating
+
+    # A detached browser comes back detached next session
+    fb.detach_button.click()
+    qapp.processEvents()
+    w._save_state()
+    w.close()
+    fb.stop()
+    w2 = MainWindow(s)
+    w2.show()
+    qapp.processEvents()
+    assert w2.browser_dock.isFloating() and w2.browser_dock.isVisible()
+    w2.file_browser.stop()
+
+
+# ------------------------------------------------------- demo sections / notes / file check
+
+def test_demo_sections_split(qapp, tmp_path):
+    from PySide6.QtWidgets import QGroupBox
+
+    w = MainWindow(Settings(demo_dir=str(tmp_path), auto_download=False))
+    groups = {g.title(): g for g in w.findChildren(QGroupBox)}
+    assert "Demo" not in groups and {"Demo Recording", "Demo Playback"} <= set(groups)
+    playback, recording = groups["Demo Playback"], groups["Demo Recording"]
+    for widget in (w.timedemo_check, w.skipsec_edit):
+        assert playback.isAncestorOf(widget) and not recording.isAncestorOf(widget)
+    assert any(b.text() == "Play demo…" for b in playback.findChildren(type(w.launch_button)))
+    for widget in (w.record_check, w.record_name, w.sequence_check, w.keep_latest_check, w.demo_dir_edit):
+        assert recording.isAncestorOf(widget)
+
+
+def test_notes_for_dww(qapp, sheet_window, monkeypatch, no_dialogs):
+    w = sheet_window
+    assert w.notes_edit.placeholderText() == \
+        "Add notes for the YouTube channel owner. These will not be added to the description."
+    w.comments_edit.setPlainText("abc")
+    w.notes_edit.setPlainText("x" * 6000)  # not counted towards the limit
+    assert w.comments_counter.text() == "3/4500" and w.comments_warning.isHidden()
+    w.notes_edit.setPlainText("Please credit me as X")
+    w.entry_edit.setText("12493")
+    assert w._submission_text() == ("Entry: 12493\nHoF/HoS: N/A\nComments: abc\n"
+                                    "DWW Notes: Please credit me as X\n")
+    w._create_text_file()
+    assert (Path(w.txt_dir_edit.text()) / "zzsketch.txt").read_text().endswith("DWW Notes: Please credit me as X\n")
+
+
+@pytest.fixture
+def demo_window(qapp, tmp_path, wad_factory, monkeypatch):
+    """A launcher whose IWAD is named freedoom2.wad (in upper case, to check case-insensitivity)."""
+    iwad = wad_factory("FREEDOOM2.WAD", "IWAD", ["MAP01"])
+    port = tmp_path / "port"
+    port.write_text("")
+    w = MainWindow(Settings(ports=[str(port)], iwads=[str(iwad)], demo_dir=str(tmp_path), auto_download=False))
+    started = []
+    monkeypatch.setattr(w, "_start", lambda opts: started.append(opts.playdemo))
+    w.started = started
+    return w
+
+
+def footer_demo(tmp_path, name, cmdline):
+    from test_lmp import demo_with_cmdline
+
+    path = tmp_path / name
+    path.write_bytes(demo_with_cmdline(cmdline))
+    return str(path)
+
+
+def test_demo_with_all_files_plays_without_asking(demo_window, tmp_path):
+    w = demo_window
+    assert w.missing_demo_files(str(DEMO_DIR / "dsda_cl2_vanilla.lmp")) == []  # freedoom2.wad ~ FREEDOOM2.WAD
+    assert w.play_demo_file(str(DEMO_DIR / "dsda_cl2_vanilla.lmp"))
+    assert w.play_demo_file(str(DEMO_DIR / "freedoom2_DEMO1.lmp"))  # no footer: nothing to check
+    assert len(w.started) == 2
+
+
+def answer_dialog(monkeypatch, play: bool, never=False, session=False):
+    from dww_launcher.ui.main_window import MissingDemoFilesDialog
+
+    shown = []
+
+    def fake_exec(self):
+        shown.append(self.findChild(QLabel).text())
+        assert self.play_button.text() == "Play anyway" and self.cancel_button.text() == "Cancel"
+        self.never_check.setChecked(never)
+        self.session_check.setChecked(session)
+        return QDialog.DialogCode.Accepted if play else QDialog.DialogCode.Rejected
+
+    monkeypatch.setattr(MissingDemoFilesDialog, "exec", fake_exec)
+    return shown
+
+
+def test_missing_files_warning_play_and_cancel(demo_window, tmp_path, monkeypatch):
+    w = demo_window
+    demo = footer_demo(tmp_path, "run.lmp", '-iwad doom2.wad -file sunlust.wad -deh sunlust.deh')
+    assert w.missing_demo_files(demo) == ["doom2.wad", "sunlust.wad", "sunlust.deh"]
+
+    shown = answer_dialog(monkeypatch, play=False)
+    assert not w.play_demo_file(demo) and w.started == []
+    assert "sunlust.wad" in shown[0] and "run.lmp" in shown[0]
+
+    answer_dialog(monkeypatch, play=True)
+    assert w.play_demo_file(demo) and w.started == [demo]
+
+    # Loading the files makes the warning go away
+    for name in ("sunlust.wad", "SUNLUST.DEH"):
+        (tmp_path / name).write_bytes(b"PWAD\0\0\0\0\x0c\0\0\0")
+    w.pwad_list.add_paths([str(tmp_path / "sunlust.wad"), str(tmp_path / "SUNLUST.DEH")])
+    assert w.missing_demo_files(demo) == ["doom2.wad"]
+
+
+def test_missing_files_ignore_for_session(demo_window, tmp_path, monkeypatch):
+    w = demo_window
+    demo = footer_demo(tmp_path, "run.lmp", "-iwad doom2.wad")
+    shown = answer_dialog(monkeypatch, play=False, session=True)
+    assert not w.play_demo_file(demo)  # Cancel still cancels...
+    assert w.play_demo_file(demo) and len(shown) == 1  # ...but this session won't ask again
+    assert not w.settings.ignore_demo_file_warning and not w.ignore_demo_warning_action.isChecked()
+    w2 = MainWindow(w.settings)  # a new session asks again
+    assert not w2._ignore_demo_warning_session
+
+
+def test_missing_files_never_ask_again_and_options_toggle(demo_window, tmp_path, monkeypatch):
+    w = demo_window
+    demo = footer_demo(tmp_path, "run.lmp", "-iwad doom2.wad")
+    shown = answer_dialog(monkeypatch, play=True, never=True)
+    assert w.play_demo_file(demo)
+    assert w.settings.ignore_demo_file_warning and w.ignore_demo_warning_action.isChecked()
+    assert w.play_demo_file(demo) and len(shown) == 1
+    assert MainWindow(w.settings).ignore_demo_warning_action.isChecked()  # remembered
+
+    w.ignore_demo_warning_action.setChecked(False)  # turned back on from the Options menu
+    assert not w.settings.ignore_demo_file_warning
+    w.play_demo_file(demo)
+    assert len(shown) == 2
+
+
+def test_missing_files_dialog_contents(qapp):
+    from dww_launcher.ui.main_window import MissingDemoFilesDialog
+
+    d = MissingDemoFilesDialog("run.lmp", ["doom2.wad", "<odd>.wad"])
+    assert d.windowTitle() == "Demo files not loaded"
+    assert d.never_check.text() == "Never ask again" and d.session_check.text() == "Ignore for this session"
+    assert d.play_button.text() == "Play anyway" and d.cancel_button.text() == "Cancel"
+    assert "&lt;odd&gt;.wad" in d.findChild(QLabel).text()  # file names are escaped
+    d.show()
+    QApplication.processEvents()
+    assert d.cancel_button.isDefault() and not d.play_button.isDefault()
+    from PySide6.QtTest import QTest
+    QTest.keyClick(d, Qt.Key.Key_Return)  # Enter cancels
+    assert d.result() == QDialog.DialogCode.Rejected
+
+
+def test_default_complevel_and_labels(qapp, tmp_path):
+    w = MainWindow(Settings(demo_dir=str(tmp_path), auto_download=False))
+    assert w.complevel_combo.currentData() == 3
+    assert w.complevel_combo.currentText() == "3 - Ultimate Doom"
+    assert "-complevel 3" in w.command_preview.toPlainText()
+    assert w.complevel_combo.itemText(0) == w.skill_combo.itemText(0) == w.map_combo.itemText(0) == "None"

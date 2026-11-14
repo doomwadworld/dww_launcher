@@ -19,6 +19,7 @@ class Profile:
     iwad: str = ""
     pwads: list[str] = field(default_factory=list)
     map: str | None = None
+    mod_maps_only: bool = False
     skill: int | None = 4
     complevel: int | None = None
     fast: bool = False

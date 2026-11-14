@@ -30,7 +30,7 @@ def _set_windows_app_id() -> None:
 def main() -> int:
     _set_windows_app_id()
     app = QApplication(sys.argv)
-    app.setApplicationName("Doom WAD World Launcher")
+    app.setApplicationName("DOOM WAD World Launcher")
     app.setApplicationVersion(__version__)
     app.setDesktopFileName("dww-launcher")  # matches a dww-launcher.desktop file on Linux
     app.setWindowIcon(app_icon())
