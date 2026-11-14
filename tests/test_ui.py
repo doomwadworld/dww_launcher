@@ -110,7 +110,7 @@ def test_maps_and_auto_select(qapp, tmp_path, wad_factory):
     w.pwad_list.add_paths([str(pwad)])
 
     assert map_labels(w) == [
-        "(start normally)", "MAP01", "MAP02   — replaced by zzsketch.wad", "MAP03",
+        "None", "MAP01", "MAP02   — replaced by zzsketch.wad", "MAP03",
         "MAP33   — new in zzsketch.wad",
     ]
     assert w.map_combo.currentData() == "MAP02"  # mod's first level auto-selected
@@ -144,7 +144,7 @@ def test_v12_complevel(qapp, tmp_path, wad_factory):
 
     w = MainWindow(Settings(iwads=[str(iwad)], demo_dir=str(tmp_path)))
     w.pwad_list.add_paths([str(new)])
-    assert w.complevel_combo.currentData() is None
+    assert w.complevel_combo.currentData() == 3  # the default, untouched by a modern mod
 
     w.pwad_list.add_paths([str(old)])
     assert w.complevel_combo.currentData() == 0
@@ -162,7 +162,8 @@ def test_v12_complevel_not_for_doom2(qapp, tmp_path, wad_factory):
     os.utime(old, (ts, ts))
     w = MainWindow(Settings(iwads=[str(iwad)], demo_dir=str(tmp_path)))
     w.pwad_list.add_paths([str(old)])
-    assert w.complevel_combo.currentData() is None
+    assert w.complevel_combo.currentData() == 3  # Doom II: no automatic switch to complevel 0
+    assert w.complevel_note.isHidden()
 
 
 def test_record_sequence_and_keep_latest(qapp, tmp_path, wad_factory, fake_port, no_dialogs):
@@ -1519,3 +1520,11 @@ def test_missing_files_dialog_contents(qapp):
     from PySide6.QtTest import QTest
     QTest.keyClick(d, Qt.Key.Key_Return)  # Enter cancels
     assert d.result() == QDialog.DialogCode.Rejected
+
+
+def test_default_complevel_and_labels(qapp, tmp_path):
+    w = MainWindow(Settings(demo_dir=str(tmp_path), auto_download=False))
+    assert w.complevel_combo.currentData() == 3
+    assert w.complevel_combo.currentText() == "3 - Ultimate Doom"
+    assert "-complevel 3" in w.command_preview.toPlainText()
+    assert w.complevel_combo.itemText(0) == w.skill_combo.itemText(0) == w.map_combo.itemText(0) == "None"

@@ -110,6 +110,7 @@ TXT_TOOLTIP = "Write the text file to the demo folder"
 YOUTUBE_URL = "https://www.youtube.com/@DOOMWADWorld"
 DISCORD_URL = "https://discord.com/invite/aUsWnqaePy"
 GITHUB_URL = "https://github.com/doomwadworld/dww_launcher"
+DEFAULT_COMPLEVEL = 3  # Ultimate Doom
 BROWSER_WIDTH = 640  # default width of the file browser panel (then remembered)
 MIN_BROWSER_WIDTH = 320
 ENTRY_PLACEHOLDER = "e.g. 12493, https://www.doomworld.com/idgames/levels/doom2/a-c/zzsketch, levels/doom/Ports/a-c/foo"
@@ -292,7 +293,7 @@ class MainWindow(QMainWindow):
         self.complevel_note.setWordWrap(True)
         self.complevel_note.setStyleSheet("color: #b36b00;")
         self.complevel_note.hide()
-        self.complevel_combo.setCurrentIndex(4) # complevel 3
+        self._select_data(self.complevel_combo, DEFAULT_COMPLEVEL)
         oform.addRow("", self.complevel_note)
 
         flags = QHBoxLayout()
